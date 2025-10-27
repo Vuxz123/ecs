@@ -5,57 +5,58 @@ import com.ethnicthv.ecs.core.ComponentManager;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
-import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * ArchetypeWorld - Main ECS World using Archetype pattern
- *
+ * <p>
  * Manages entities, components, and archetypes for cache-friendly data access.
  * Entities with the same component composition are grouped together in archetypes.
  */
 public final class ArchetypeWorld implements AutoCloseable {
     private final ArchetypeManager archetypeManager;
     private final ComponentManager componentManager;
-    private final Map<Integer, EntityRecord> entityRecords; // entityId -> location in archetype
-    private final Map<Class<?>, Integer> componentTypeIds;
-    private final Map<Integer, ComponentMetadata> componentMetadata;
+    private final ConcurrentHashMap<Integer, EntityRecord> entityRecords; // entityId -> location in archetype
+    private final ConcurrentHashMap<Class<?>, Integer> componentTypeIds;
+    private final ConcurrentHashMap<Integer, ComponentMetadata> componentMetadata;
     private final Arena arena;
-    private int nextEntityId = 1;
-    private int nextComponentTypeId = 0;
+    private final AtomicInteger nextEntityId = new AtomicInteger(1);
+    private final AtomicInteger nextComponentTypeId = new AtomicInteger(0);
 
     public ArchetypeWorld(ComponentManager componentManager) {
         this.arena = Arena.ofShared();
-        this.archetypeManager = new ArchetypeManager(arena);
         this.componentManager = componentManager;
-        this.entityRecords = new HashMap<>();
-        this.componentTypeIds = new HashMap<>();
-        this.componentMetadata = new HashMap<>();
+        this.entityRecords = new ConcurrentHashMap<>();
+        this.componentTypeIds = new ConcurrentHashMap<>();
+        this.componentMetadata = new ConcurrentHashMap<>();
+        // Initialize ArchetypeManager after metadata map is ready
+        this.archetypeManager = new ArchetypeManager(arena, componentManager, this::getComponentMetadata);
     }
 
     /**
      * Register a component type via ComponentManager
      */
     public <T> int registerComponent(Class<T> componentClass) {
-        int id = componentTypeIds.computeIfAbsent(componentClass, c -> {
-            int tid = componentManager.registerComponent(componentClass);
+        return componentTypeIds.computeIfAbsent(componentClass, cls -> {
+            int tid = componentManager.registerComponent(cls);
             // store metadata from descriptor
-            ComponentDescriptor desc = componentManager.getDescriptor(componentClass);
-            componentMetadata.put(tid, new ComponentMetadata(tid, componentClass, desc.getTotalSize()));
-            // update nextComponentTypeId to reflect assigned id
-            nextComponentTypeId = Math.max(nextComponentTypeId, tid + 1);
+            ComponentDescriptor desc = componentManager.getDescriptor(cls);
+            componentMetadata.put(tid, new ComponentMetadata(tid, cls, desc.getTotalSize()));
+            // update nextComponentTypeId to reflect assigned id atomically
+            nextComponentTypeId.updateAndGet(prev -> Math.max(prev, tid + 1));
             return tid;
         });
-        return id;
     }
 
     /**
      * Create a new entity
      */
     public int createEntity() {
-        int entityId = nextEntityId++;
+        int entityId = nextEntityId.getAndIncrement();
         // Start with empty archetype (no components)
         ComponentMask emptyMask = new ComponentMask();
-        Archetype archetype = archetypeManager.getOrCreateArchetype(emptyMask, new int[0], new ComponentDescriptor[0]);
+        Archetype archetype = archetypeManager.getOrCreateArchetype(emptyMask);
         ArchetypeChunk.ChunkLocation location = archetype.addEntity(entityId);
         entityRecords.put(entityId, new EntityRecord(archetype, location, emptyMask));
         return entityId;
@@ -83,7 +84,7 @@ public final class ArchetypeWorld implements AutoCloseable {
 
         // Set component data
         EntityRecord newRecord = entityRecords.get(entityId);
-        int componentIndex = findComponentIndex(newRecord.archetype.getComponentIds(), componentTypeId);
+        int componentIndex = newRecord.archetype.indexOfComponentType(componentTypeId);
         newRecord.archetype.setComponentData(newRecord.location, componentIndex, data);
     }
 
@@ -122,7 +123,7 @@ public final class ArchetypeWorld implements AutoCloseable {
             return null;
         }
 
-        int componentIndex = findComponentIndex(record.archetype.getComponentIds(), componentTypeId);
+        int componentIndex = record.archetype.indexOfComponentType(componentTypeId);
         return record.archetype.getComponentData(record.location, componentIndex);
     }
 
@@ -198,48 +199,17 @@ public final class ArchetypeWorld implements AutoCloseable {
     // ============ Internal Methods ============
 
     private void moveEntityToArchetype(int entityId, EntityRecord oldRecord, ComponentMask newMask) {
-        // Build component arrays info for new archetype
-        List<Integer> componentIdsList = new ArrayList<>();
+        // Delegate archetype construction to ArchetypeManager
+        Archetype newArchetype = archetypeManager.getOrCreateArchetype(newMask);
 
-        for (int i = 0; i < nextComponentTypeId; i++) {
-            if (newMask.has(i)) {
-                componentIdsList.add(i);
-            }
-        }
-
-        int[] componentIds = componentIdsList.stream().mapToInt(Integer::intValue).toArray();
-
-        // Build ComponentDescriptor[] for these ids
-        ComponentDescriptor[] descriptors = new ComponentDescriptor[componentIds.length];
-        for (int i = 0; i < componentIds.length; i++) {
-            ComponentMetadata meta = componentMetadata.get(componentIds[i]);
-            if (meta == null) {
-                throw new IllegalStateException("Component metadata missing for id=" + componentIds[i]);
-            }
-            descriptors[i] = componentManager.getDescriptor(meta.type);
-        }
-
-        // Get or create new archetype
-        Archetype newArchetype = archetypeManager.getOrCreateArchetype(newMask, componentIds, descriptors);
-
-        // Copy existing component data
+        // Copy existing component data (only components present in both)
         ArchetypeChunk.ChunkLocation newLocation = newArchetype.addEntity(entityId);
-
-        // Only copy components that exist in BOTH old and new archetypes
-        int[] oldComponentIds = oldRecord.archetype.getComponentIds();
-        for (int newIdx = 0; newIdx < componentIds.length; newIdx++) {
-            int componentTypeId = componentIds[newIdx];
+        int[] componentIds = newMask.toComponentIdArray();
+        for (int componentTypeId : componentIds) {
             if (oldRecord.mask.has(componentTypeId)) {
-                // Find this component's index in the OLD archetype
-                int oldIdx = -1;
-                for (int j = 0; j < oldComponentIds.length; j++) {
-                    if (oldComponentIds[j] == componentTypeId) {
-                        oldIdx = j;
-                        break;
-                    }
-                }
-
-                if (oldIdx >= 0) {
+                int oldIdx = oldRecord.archetype.indexOfComponentType(componentTypeId);
+                int newIdx = newArchetype.indexOfComponentType(componentTypeId);
+                if (oldIdx >= 0 && newIdx >= 0) {
                     MemorySegment oldData = oldRecord.archetype.getComponentData(oldRecord.location, oldIdx);
                     if (oldData != null) {
                         newArchetype.setComponentData(newLocation, newIdx, oldData);
@@ -253,18 +223,6 @@ public final class ArchetypeWorld implements AutoCloseable {
 
         // Update entity record
         entityRecords.put(entityId, new EntityRecord(newArchetype, newLocation, newMask));
-    }
-
-    /**
-     * Find the index of a component type ID in the archetype's component array
-     */
-    private int findComponentIndex(int[] componentIds, int componentTypeId) {
-        for (int i = 0; i < componentIds.length; i++) {
-            if (componentIds[i] == componentTypeId) {
-                return i;
-            }
-        }
-        return -1;
     }
 
     // ============ Internal Records ============

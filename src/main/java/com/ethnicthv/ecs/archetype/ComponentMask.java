@@ -1,7 +1,6 @@
 package com.ethnicthv.ecs.archetype;
 
 import java.util.BitSet;
-import java.util.Objects;
 
 /**
  * Represents a unique signature of components that an entity possesses.
@@ -56,10 +55,47 @@ public final class ComponentMask {
     }
 
     /**
+     * Optimized: return true if this mask is a superset of other (WITH semantics).
+     */
+    public boolean containsAll(ComponentMask other) {
+        // other - this == empty ?
+        BitSet diff = (BitSet) other.mask.clone();
+        diff.andNot(this.mask);
+        return diff.isEmpty();
+    }
+
+    /**
+     * Optimized: return true if this mask shares at least one bit with other (ANY semantics).
+     */
+    public boolean intersects(ComponentMask other) {
+        return this.mask.intersects(other.mask);
+    }
+
+    /**
+     * Optimized: return true if this mask has no bits in common with other (WITHOUT semantics).
+     */
+    public boolean containsNone(ComponentMask other) {
+        return !this.mask.intersects(other.mask);
+    }
+
+    /**
      * Get the number of components in this mask
      */
     public int cardinality() {
         return mask.cardinality();
+    }
+
+    /**
+     * Return all set component IDs in ascending order.
+     */
+    public int[] toComponentIdArray() {
+        int count = mask.cardinality();
+        int[] ids = new int[count];
+        int idx = 0;
+        for (int bit = mask.nextSetBit(0); bit >= 0; bit = mask.nextSetBit(bit + 1)) {
+            ids[idx++] = bit;
+        }
+        return ids;
     }
 
     @Override

@@ -8,7 +8,7 @@ import java.util.List;
 
 /**
  * Query system for filtering archetypes based on component requirements.
- *
+ * <p>
  * Supports:
  * - with(): entities MUST have these components
  * - without(): entities MUST NOT have these components
@@ -49,8 +49,7 @@ public final class ArchetypeQuery {
     /**
      * Require entities to have at least one of the specified components
      */
-    @SafeVarargs
-    public final ArchetypeQuery any(Class<?>... componentClasses) {
+    public ArchetypeQuery any(Class<?>... componentClasses) {
         ComponentMask.Builder anyBuilder = ComponentMask.builder();
         for (Class<?> componentClass : componentClasses) {
             Integer componentTypeId = world.getComponentTypeId(componentClass);
@@ -72,41 +71,23 @@ public final class ArchetypeQuery {
         for (Archetype archetype : world.getAllArchetypes()) {
             ComponentMask archetypeMask = archetype.getMask();
 
-            // Check WITH requirements
-            if (!archetypeMask.contains(with)) {
+            // WITH: archetype must contain all required bits
+            if (!archetypeMask.containsAll(with)) {
                 continue;
             }
-
-            // Check WITHOUT requirements
-            boolean hasExcluded = false;
-            for (int i = 0; i < 64; i++) {
-                if (without.has(i) && archetypeMask.has(i)) {
-                    hasExcluded = true;
-                    break;
-                }
-            }
-            if (hasExcluded) {
+            // WITHOUT: archetype must contain none of the excluded bits
+            if (!archetypeMask.containsNone(without)) {
                 continue;
             }
-
-            // Check ANY requirements
+            // ANY: archetype must intersect at least one any-mask (if present)
             if (!anyMasks.isEmpty()) {
                 boolean matchesAny = false;
                 for (ComponentMask anyMask : anyMasks) {
-                    for (int i = 0; i < 64; i++) {
-                        if (anyMask.has(i) && archetypeMask.has(i)) {
-                            matchesAny = true;
-                            break;
-                        }
-                    }
-                    if (matchesAny) break;
+                    if (archetypeMask.intersects(anyMask)) { matchesAny = true; break; }
                 }
-                if (!matchesAny) {
-                    continue;
-                }
+                if (!matchesAny) continue;
             }
 
-            // Archetype matches query - iterate over its entities
             consumer.accept(archetype);
         }
     }
@@ -138,43 +119,40 @@ public final class ArchetypeQuery {
      * The consumer receives an array of bound ComponentHandle (same order as componentClasses). The handles are released
      * back to the manager after the consumer returns. This is intended for synchronous, short-lived access inside the consumer.
      */
-    @SafeVarargs
-    public final void forEachEntityWith(EntityWithHandlesConsumer consumer, Class<?>... componentClasses) {
+    public void forEachEntityWith(EntityWithHandlesConsumer consumer, Class<?>... componentClasses) {
         // Resolve component type IDs for requested classes
-        Integer[] reqTypeIds = new Integer[componentClasses.length];
+        int[] reqTypeIds = new int[componentClasses.length];
         for (int i = 0; i < componentClasses.length; i++) {
-            reqTypeIds[i] = world.getComponentTypeId(componentClasses[i]);
-            if (reqTypeIds[i] == null) {
+            Integer tid = world.getComponentTypeId(componentClasses[i]);
+            if (tid == null) {
                 // If a requested component class is not registered, no entity will match; return early
                 return;
             }
+            reqTypeIds[i] = tid;
         }
 
         ComponentManager mgr = world.getComponentManager();
 
         forEach(archetype -> {
-            int[] archCompIds = archetype.getComponentIds();
-            // For each requested type, find index inside archetype or -1
+            // Compute component indices for this archetype using its internal cache
             int[] compIndices = new int[reqTypeIds.length];
-            boolean allPresent = true;
             for (int i = 0; i < reqTypeIds.length; i++) {
-                int tid = reqTypeIds[i];
-                int idx = -1;
-                for (int j = 0; j < archCompIds.length; j++) {
-                    if (archCompIds[j] == tid) { idx = j; break; }
+                int idx = archetype.indexOfComponentType(reqTypeIds[i]);
+                if (idx < 0) {
+                    // archetype missing at least one required component; skip it
+                    return;
                 }
                 compIndices[i] = idx;
-                if (idx < 0) { allPresent = false; break; }
             }
-            if (!allPresent) return; // this archetype doesn't contain all requested components
 
             // Iterate entities in archetype
+            final int[] useIdx = compIndices; // capture
             archetype.forEach((entityId, location, chunk) -> {
                 ComponentManager.BoundHandle[] bound = new ComponentManager.BoundHandle[componentClasses.length];
                 ComponentHandle[] handles = new ComponentHandle[componentClasses.length];
                 try {
-                    for (int k = 0; k < compIndices.length; k++) {
-                        int compIdx = compIndices[k];
+                    for (int k = 0; k < useIdx.length; k++) {
+                        int compIdx = useIdx[k];
                         var seg = chunk.getComponentData(compIdx, location.indexInChunk);
                         bound[k] = mgr.acquireBoundHandle(componentClasses[k], seg);
                         handles[k] = bound[k].handle();
@@ -182,9 +160,9 @@ public final class ArchetypeQuery {
 
                     consumer.accept(entityId, handles, location, archetype);
                 } finally {
-                    for (int k = 0; k < bound.length; k++) {
-                        if (bound[k] != null) {
-                            try { bound[k].close(); } catch (Exception ignored) {}
+                    for (ComponentManager.BoundHandle boundHandle : bound) {
+                        if (boundHandle != null) {
+                            try { boundHandle.close(); } catch (Exception ignored) {}
                         }
                     }
                 }
