@@ -1,6 +1,6 @@
 package com.ethnicthv.ecs;
 
-import com.ethnicthv.ecs.archetype.ComponentMask;
+import com.ethnicthv.ecs.core.archetype.ComponentMask;
 
 /**
  * Benchmark comparing ComponentMask (BitSet) vs int[] for component lookups

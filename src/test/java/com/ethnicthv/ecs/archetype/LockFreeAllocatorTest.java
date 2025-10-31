@@ -1,13 +1,15 @@
 package com.ethnicthv.ecs.archetype;
 
-import com.ethnicthv.ecs.core.Component;
-import com.ethnicthv.ecs.core.ComponentDescriptor;
+import com.ethnicthv.ecs.core.components.Component;
+import com.ethnicthv.ecs.core.components.ComponentDescriptor;
+import com.ethnicthv.ecs.core.archetype.Archetype;
+import com.ethnicthv.ecs.core.archetype.ArchetypeChunk;
+import com.ethnicthv.ecs.core.archetype.ComponentMask;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.lang.foreign.Arena;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;

@@ -1,6 +1,8 @@
 plugins {
     id("java")
     id("application")
+    `java-library`
+    id("me.champeau.jmh") version "0.7.3"
 }
 
 group = "com.ethnicthv"
@@ -17,9 +19,25 @@ repositories {
 }
 
 dependencies {
+    // Enable our annotation processor for compile
+    annotationProcessor(project(":ecs-processor"))
+    // Enable it for tests as well
+    testAnnotationProcessor(project(":ecs-processor"))
+
     testImplementation(platform("org.junit:junit-bom:5.10.0"))
     testImplementation("org.junit.jupiter:junit-jupiter")
+    testImplementation("org.junit.platform:junit-platform-suite-api")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    testRuntimeOnly("org.junit.platform:junit-platform-suite-engine")
+
+    // JMH for benchmarking
+    implementation ("org.openjdk.jmh:jmh-core:0.9")
+    annotationProcessor ("org.openjdk.jmh:jmh-generator-annprocess:0.9")
+    // proc ('org.openjdk.jmh:jmh-generator-bytecode:0.9')
+
+    // Fix for "NoClassDefFoundError: javax/annotation/Generated" on JDK 9+
+    annotationProcessor("javax.annotation:javax.annotation-api:1.3.2")
+    implementation("javax.annotation:javax.annotation-api:1.3.2")
 }
 
 application {
