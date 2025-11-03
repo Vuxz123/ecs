@@ -9,15 +9,17 @@ import java.lang.foreign.MemorySegment;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicLongArray;
+import java.util.Arrays;
 
 /**
  * Single chunk storing SoA arrays for each component.
  */
 public final class ArchetypeChunk implements IArchetypeChunk {
 
-    private final ComponentDescriptor[] descriptors;
     private final long[] elementSizes;
     private final MemorySegment[] componentArrays;
+    // New: per-managed-type ticket arrays; may be empty if no managed types
+    private final int[][] managedComponentIndexArrays;
     private final int capacity;
     // Lock-free free list: Treiber stack of free indices
     private final AtomicInteger freeHead; // head index of free list, -1 if none
@@ -40,8 +42,13 @@ public final class ArchetypeChunk implements IArchetypeChunk {
         }
     }
 
+    // Backwards-compatible constructor (no managed types)
     public ArchetypeChunk(ComponentDescriptor[] descriptors, long[] elementSizes, int capacity, Arena arena) {
-        this.descriptors = descriptors;
+        this(descriptors, elementSizes, capacity, arena, 0);
+    }
+
+    // New constructor supporting managed types
+    public ArchetypeChunk(ComponentDescriptor[] descriptors, long[] elementSizes, int capacity, Arena arena, int managedTypeCount) {
         this.elementSizes = elementSizes;
         this.capacity = capacity;
         this.arena = arena;
@@ -74,6 +81,18 @@ public final class ArchetypeChunk implements IArchetypeChunk {
             } catch (OutOfMemoryError oom) {
                 throw new ECSMemoryAllocationException("Failed to allocate component array (index=" + i + ", bytes=" + bytes + ", capacity=" + capacity + ")", oom);
             }
+        }
+
+        // Initialize managed ticket arrays (filled with -1 indicating empty)
+        if (managedTypeCount > 0) {
+            this.managedComponentIndexArrays = new int[managedTypeCount][];
+            for (int i = 0; i < managedTypeCount; i++) {
+                int[] arr = new int[capacity];
+                Arrays.fill(arr, -1);
+                this.managedComponentIndexArrays[i] = arr;
+            }
+        } else {
+            this.managedComponentIndexArrays = new int[0][];
         }
 
         // keep entityIds initialized to -1
@@ -133,6 +152,10 @@ public final class ArchetypeChunk implements IArchetypeChunk {
             long elemSize = elementSizes[c];
             long offset = elemSize * (long) idx;
             componentArrays[c].asSlice(offset, elemSize).fill((byte) 0);
+        }
+        // Reset managed tickets to -1 for this slot
+        for (int i = 0; i < managedComponentIndexArrays.length; i++) {
+            managedComponentIndexArrays[i][idx] = -1;
         }
     }
 
@@ -253,5 +276,31 @@ public final class ArchetypeChunk implements IArchetypeChunk {
             if (word >= words) return -1;
             w = occupancy.get(word);
         }
+    }
+
+    // ===== Managed component ticket accessors =====
+
+    public int[] getManagedIndexArray(int managedTypeIndex) {
+        return managedComponentIndexArrays[managedTypeIndex];
+    }
+
+    public int getManagedTicket(int managedTypeIndex, int elementIndex) {
+        if (managedTypeIndex < 0 || managedTypeIndex >= managedComponentIndexArrays.length) {
+            throw new IndexOutOfBoundsException("managedTypeIndex out of range");
+        }
+        if (elementIndex < 0 || elementIndex >= capacity) {
+            throw new IndexOutOfBoundsException("elementIndex out of range");
+        }
+        return managedComponentIndexArrays[managedTypeIndex][elementIndex];
+    }
+
+    public void setManagedTicket(int managedTypeIndex, int elementIndex, int ticket) {
+        if (managedTypeIndex < 0 || managedTypeIndex >= managedComponentIndexArrays.length) {
+            throw new IndexOutOfBoundsException("managedTypeIndex out of range");
+        }
+        if (elementIndex < 0 || elementIndex >= capacity) {
+            throw new IndexOutOfBoundsException("elementIndex out of range");
+        }
+        managedComponentIndexArrays[managedTypeIndex][elementIndex] = ticket;
     }
 }

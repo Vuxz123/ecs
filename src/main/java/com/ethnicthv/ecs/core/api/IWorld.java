@@ -1,6 +1,6 @@
 package com.ethnicthv.ecs.core.api;
 
-import com.ethnicthv.ecs.core.api.archetype.IArchetypeQuery;
+import com.ethnicthv.ecs.core.api.archetype.IQueryBuilder;
 
 /**
  * Public API for the ECS world, providing safe access to entity and component management.
@@ -50,11 +50,11 @@ public interface IWorld extends AutoCloseable {
     void destroyEntity(int entityId);
 
     /**
-     * Create a query for filtering entities based on component requirements.
+     * Create a query builder for filtering entities based on component requirements.
      *
-     * @return A new query instance.
+     * @return A new query builder instance.
      */
-    IArchetypeQuery query();
+    IQueryBuilder query();
 
     /**
      * Get the total number of entities currently in the world.
@@ -77,4 +77,3 @@ public interface IWorld extends AutoCloseable {
     @Override
     void close();
 }
-

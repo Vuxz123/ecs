@@ -1,5 +1,7 @@
 package com.ethnicthv.ecs.archetype;
 
+import com.ethnicthv.ecs.core.api.archetype.IQuery;
+import com.ethnicthv.ecs.core.api.archetype.IQueryBuilder;
 import com.ethnicthv.ecs.core.archetype.ArchetypeQuery;
 import com.ethnicthv.ecs.core.archetype.ArchetypeWorld;
 import com.ethnicthv.ecs.core.components.ComponentManager;
@@ -48,9 +50,11 @@ public class ParallelQueryTest {
         AtomicInteger count = new AtomicInteger(0);
         Set<Integer> processedEntities = ConcurrentHashMap.newKeySet();
 
-        ArchetypeQuery query = world.query();
-        query.with(TestComponent1.class)
+        IQueryBuilder builder = world.query();
+        builder.with(TestComponent1.class)
              .with(TestComponent2.class);
+
+        IQuery query = builder.build();
 
         query.forEachParallel((entityId, handles, archetype) -> {
             count.incrementAndGet();
@@ -77,9 +81,10 @@ public class ParallelQueryTest {
         AtomicInteger counter = new AtomicInteger(0);
         Set<Integer> uniqueEntityIds = ConcurrentHashMap.newKeySet();
 
-        ArchetypeQuery query = world.query();
-        query.with(TestComponent1.class);
+        IQueryBuilder builder = world.query();
+        builder.with(TestComponent1.class);
 
+        IQuery query = builder.build();
         query.forEachParallel((entityId, handles, archetype) -> {
             counter.incrementAndGet();
             uniqueEntityIds.add(entityId);
@@ -119,9 +124,10 @@ public class ParallelQueryTest {
         AtomicInteger count = new AtomicInteger(0);
         Set<Integer> processedEntities = ConcurrentHashMap.newKeySet();
 
-        ArchetypeQuery query = world.query();
-        query.with(TestComponent1.class);
+        IQueryBuilder builder = world.query();
+        builder.with(TestComponent1.class);
 
+        IQuery query = builder.build();
         query.forEachParallel((entityId, handles, archetype) -> {
             count.incrementAndGet();
             processedEntities.add(entityId);
@@ -139,10 +145,11 @@ public class ParallelQueryTest {
 
         AtomicInteger count = new AtomicInteger(0);
 
-        ArchetypeQuery query = world.query();
-        query.with(TestComponent1.class);
+        IQueryBuilder builder = world.query();
+        builder.with(TestComponent1.class);
 
         // Should not call consumer for empty query
+        IQuery query = builder.build();
         query.forEachParallel((entityId, handles, archetype) -> count.incrementAndGet());
 
         assertEquals(0, count.get());
@@ -152,10 +159,11 @@ public class ParallelQueryTest {
     void testForEachParallelNullConsumer() {
         world.registerComponent(TestComponent1.class);
 
-        ArchetypeQuery query = world.query();
-        query.with(TestComponent1.class);
+        IQueryBuilder builder = world.query();
+        builder.with(TestComponent1.class);
 
         // Should throw NullPointerException
+        IQuery query = builder.build();
         assertThrows(NullPointerException.class, () -> query.forEachParallel(null));
     }
 
@@ -173,11 +181,12 @@ public class ParallelQueryTest {
         // Process in parallel and verify count
         AtomicInteger count = new AtomicInteger(0);
 
-        ArchetypeQuery query = world.query();
-        query.with(TestComponent1.class);
+        IQueryBuilder builder = world.query();
+        builder.with(TestComponent1.class);
 
+        IQuery query = builder.build();
         long startTime = System.nanoTime();
-        query.forEachParallel((entityId, handles, archetype) -> count.incrementAndGet());
+        query.forEachParallel((_, _, _) -> count.incrementAndGet());
         long duration = System.nanoTime() - startTime;
 
         assertEquals(entityCount, count.get());
@@ -198,9 +207,10 @@ public class ParallelQueryTest {
             world.createEntity(TestComponent1.class);
         }
 
-        ArchetypeQuery query = world.query();
-        query.with(TestComponent1.class);
+        IQueryBuilder builder = world.query();
+        builder.with(TestComponent1.class);
 
+        IQuery query = builder.build();
         // Sequential processing
         Set<Integer> sequentialEntities = new HashSet<>();
         query.forEachEntity((entityId, handles, archetype) ->
@@ -232,10 +242,11 @@ public class ParallelQueryTest {
         // Query for entities that must have Component2 (none will match)
         AtomicInteger count = new AtomicInteger(0);
 
-        ArchetypeQuery query = world.query();
-        query.with(TestComponent2.class);
+        IQueryBuilder builder = world.query();
+        builder.with(TestComponent2.class);
 
-        query.forEachParallel((entityId, handles, arch) -> count.incrementAndGet());
+        IQuery query = builder.build();
+        query.forEachParallel((_, _, _) -> count.incrementAndGet());
 
         assertEquals(0, count.get());
     }
@@ -255,9 +266,10 @@ public class ParallelQueryTest {
         AtomicInteger validEntityCount = new AtomicInteger(0);
         AtomicInteger invalidEntityCount = new AtomicInteger(0);
 
-        ArchetypeQuery query = world.query();
-        query.with(TestComponent1.class);
+        IQueryBuilder builder = world.query();
+        builder.with(TestComponent1.class);
 
+        IQuery query = builder.build();
         query.forEachParallel((entityId, handles, arch) -> {
             if (entityId > 0 && arch != null) {
                 validEntityCount.incrementAndGet();

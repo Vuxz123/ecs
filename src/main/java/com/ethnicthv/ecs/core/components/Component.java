@@ -51,5 +51,14 @@ public interface Component {
         PADDING,     // Add padding for alignment
         EXPLICIT     // Use explicit offsets
     }
+
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.TYPE)
+    @interface Unmanaged {
+    }
+
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.TYPE)
+    @interface Managed {}
 }
 

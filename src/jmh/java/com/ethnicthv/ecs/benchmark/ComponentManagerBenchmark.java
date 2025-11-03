@@ -27,7 +27,7 @@ public class ComponentManagerBenchmark {
 
     @State(Scope.Thread)
     public static class BenchmarkState {
-        @Param({"10000", "100000"})
+        @Param({"10", "100", "1000", "10000", "100000", "1000000"})
         public int entityCount;
 
         public ComponentManager manager;
@@ -102,7 +102,7 @@ public class ComponentManagerBenchmark {
 
     @State(Scope.Thread)
     public static class QueryState {
-        @Param({"100000"})
+        @Param({"10", "100", "1000", "10000", "100000", "1000000"})
         public int entityCount;
 
         public ComponentManager manager;
@@ -156,7 +156,10 @@ public class ComponentManagerBenchmark {
     @Benchmark
     public void queryIteration_ReadWrite(QueryState state, Blackhole bh) {
         final int[] count = {0};
-        state.world.query().forEachEntityWith((entityId, handles, location, archetype) -> {
+        state.world.query()
+                .with(PositionComponent.class)
+                .with(VelocityComponent.class)
+                .forEachEntity((_, handles, _) -> {
             float x = handles[0].getFloat(state.POS_X);
             float y = handles[0].getFloat(state.POS_Y);
             float vx = handles[1].getFloat(state.VEL_VX);
@@ -164,17 +167,20 @@ public class ComponentManagerBenchmark {
             // Simple computation to prevent optimization
             bh.consume(x + y + vx + vy);
             count[0]++;
-        }, PositionComponent.class, VelocityComponent.class);
+        });
         bh.consume(count[0]);
     }
 
     @Benchmark
     public void queryIteration_Update(QueryState state) {
-        state.world.query().forEachEntityWith((entityId, handles, location, archetype) -> {
+        state.world.query()
+                .with(PositionComponent.class)
+                .with(VelocityComponent.class)
+                .forEachEntity((_, handles, _) -> {
             float x = handles[0].getFloat(state.POS_X);
             float vx = handles[1].getFloat(state.VEL_VX);
             handles[0].setFloat(state.POS_X, x + vx);
-        }, PositionComponent.class, VelocityComponent.class);
+        });
     }
 
 
@@ -270,5 +276,263 @@ public class ComponentManagerBenchmark {
             }
             state.world.addComponent(state.entities[i], VelocityComponent.class, vel);
         }
+    }
+
+    // ========== Large Scale Benchmarks ==========
+
+    @State(Scope.Thread)
+    public static class LargeScaleState {
+        @Param({"10", "100", "1000", "10000", "100000", "1000000"})
+        public int entityCount;
+
+        public ComponentManager manager;
+        public ArchetypeWorld world;
+        public Arena arena;
+        public int POS_X, POS_Y, VEL_VX, VEL_VY;
+
+        @Setup(Level.Trial)
+        public void setup() {
+            manager = new ComponentManager();
+            world = new ArchetypeWorld(manager);
+            arena = Arena.ofConfined();
+
+            world.registerComponent(PositionComponent.class);
+            world.registerComponent(VelocityComponent.class);
+            world.registerComponent(TransformComponent.class);
+            world.registerComponent(HealthComponent.class);
+
+            POS_X = manager.getDescriptor(PositionComponent.class).getFieldIndex("x");
+            POS_Y = manager.getDescriptor(PositionComponent.class).getFieldIndex("y");
+            VEL_VX = manager.getDescriptor(VelocityComponent.class).getFieldIndex("vx");
+            VEL_VY = manager.getDescriptor(VelocityComponent.class).getFieldIndex("vy");
+
+            // Create entities with different archetypes for realistic scenario
+            for (int i = 0; i < entityCount; i++) {
+                int e = world.createEntity();
+
+                // All entities have position
+                MemorySegment pos = manager.allocate(PositionComponent.class, arena);
+                try(var h = manager.acquireBoundHandle(PositionComponent.class, pos)) {
+                    h.handle().setFloat(POS_X, i * 0.1f);
+                    h.handle().setFloat(POS_Y, i * 0.2f);
+                }
+                world.addComponent(e, PositionComponent.class, pos);
+
+                // 70% have velocity
+                if (i % 10 < 7) {
+                    MemorySegment vel = manager.allocate(VelocityComponent.class, arena);
+                    try(var h = manager.acquireBoundHandle(VelocityComponent.class, vel)) {
+                        h.handle().setFloat(VEL_VX, (i % 3 - 1) * 0.5f);
+                        h.handle().setFloat(VEL_VY, (i % 5 - 2) * 0.3f);
+                    }
+                    world.addComponent(e, VelocityComponent.class, vel);
+                }
+
+                // 30% have health
+                if (i % 10 < 3) {
+                    MemorySegment health = manager.allocate(HealthComponent.class, arena);
+                    world.addComponent(e, HealthComponent.class, health);
+                }
+            }
+        }
+
+        @TearDown(Level.Trial)
+        public void teardown() {
+            world.close();
+            arena.close();
+        }
+    }
+
+    @Benchmark
+    public void largeScale_SequentialQuery(LargeScaleState state, Blackhole bh) {
+        final int[] count = {0};
+        state.world.query()
+                .with(PositionComponent.class)
+                .with(VelocityComponent.class)
+                .forEachEntity((_, handles, _) -> {
+                    float x = handles[0].getFloat(state.POS_X);
+                    float vx = handles[1].getFloat(state.VEL_VX);
+                    handles[0].setFloat(state.POS_X, x + vx * 0.016f);
+                    count[0]++;
+                });
+        bh.consume(count[0]);
+    }
+
+    @Benchmark
+    public void largeScale_ParallelQuery(LargeScaleState state, Blackhole bh) {
+        final int[] count = {0};
+        state.world.query()
+                .with(PositionComponent.class)
+                .with(VelocityComponent.class)
+                .forEachParallel((_, handles, _) -> {
+                    float x = handles[0].getFloat(state.POS_X);
+                    float vx = handles[1].getFloat(state.VEL_VX);
+                    handles[0].setFloat(state.POS_X, x + vx * 0.016f);
+                    synchronized (count) {
+                        count[0]++;
+                    }
+                });
+        bh.consume(count[0]);
+    }
+
+    @Benchmark
+    public void largeScale_MultipleQueries(LargeScaleState state, Blackhole bh) {
+        // Simulate multiple systems running different queries
+        final int[] total = {0};
+
+        // Query 1: Position + Velocity (movement system)
+        state.world.query()
+                .with(PositionComponent.class)
+                .with(VelocityComponent.class)
+                .forEachEntity((_, handles, _) -> {
+                    float x = handles[0].getFloat(state.POS_X);
+                    float vx = handles[1].getFloat(state.VEL_VX);
+                    handles[0].setFloat(state.POS_X, x + vx * 0.016f);
+                    total[0]++;
+                });
+
+        // Query 2: Position only (render system)
+        state.world.query()
+                .with(PositionComponent.class)
+                .forEachEntity((_, handles, _) -> {
+                    float x = handles[0].getFloat(state.POS_X);
+                    float y = handles[0].getFloat(state.POS_Y);
+                    bh.consume(x * x + y * y); // Distance calculation
+                    total[0]++;
+                });
+
+        bh.consume(total[0]);
+    }
+
+    @State(Scope.Thread)
+    public static class MemoryPressureState {
+        @Param({"1000", "10000", "100000"})
+        public int entityCount;
+
+        public ComponentManager manager;
+        public ArchetypeWorld world;
+        public Arena arena;
+        public int POS_X, POS_Y;
+
+        @Setup(Level.Invocation)
+        public void setup() {
+            manager = new ComponentManager();
+            world = new ArchetypeWorld(manager);
+            arena = Arena.ofConfined();
+
+            world.registerComponent(PositionComponent.class);
+            world.registerComponent(VelocityComponent.class);
+            world.registerComponent(TransformComponent.class);
+
+            POS_X = manager.getDescriptor(PositionComponent.class).getFieldIndex("x");
+            POS_Y = manager.getDescriptor(PositionComponent.class).getFieldIndex("y");
+        }
+
+        @TearDown(Level.Invocation)
+        public void teardown() {
+            world.close();
+            arena.close();
+        }
+    }
+
+    @Benchmark
+    public void memoryPressure_CreateAndDestroy(MemoryPressureState state) {
+        // Create entities
+        int[] entities = new int[state.entityCount];
+        for (int i = 0; i < state.entityCount; i++) {
+            entities[i] = state.world.createEntity();
+            MemorySegment pos = state.manager.allocate(PositionComponent.class, state.arena);
+            try(var h = state.manager.acquireBoundHandle(PositionComponent.class, pos)) {
+                h.handle().setFloat(state.POS_X, i * 0.1f);
+                h.handle().setFloat(state.POS_Y, i * 0.2f);
+            }
+            state.world.addComponent(entities[i], PositionComponent.class, pos);
+        }
+
+        // Destroy half
+        for (int i = 0; i < state.entityCount / 2; i++) {
+            state.world.destroyEntity(entities[i]);
+        }
+    }
+
+    @State(Scope.Thread)
+    public static class ThroughputState {
+        @Param({"100000", "1000000"})
+        public int entityCount;
+
+        public ComponentManager manager;
+        public ArchetypeWorld world;
+        public Arena arena;
+        public int POS_X, POS_Y, VEL_VX, VEL_VY;
+
+        @Setup(Level.Trial)
+        public void setup() {
+            manager = new ComponentManager();
+            world = new ArchetypeWorld(manager);
+            arena = Arena.ofConfined();
+
+            world.registerComponent(PositionComponent.class);
+            world.registerComponent(VelocityComponent.class);
+
+            POS_X = manager.getDescriptor(PositionComponent.class).getFieldIndex("x");
+            POS_Y = manager.getDescriptor(PositionComponent.class).getFieldIndex("y");
+            VEL_VX = manager.getDescriptor(VelocityComponent.class).getFieldIndex("vx");
+            VEL_VY = manager.getDescriptor(VelocityComponent.class).getFieldIndex("vy");
+
+            // Setup entities for throughput test
+            for (int i = 0; i < entityCount; i++) {
+                int e = world.createEntity();
+
+                MemorySegment pos = manager.allocate(PositionComponent.class, arena);
+                try(var h = manager.acquireBoundHandle(PositionComponent.class, pos)) {
+                    h.handle().setFloat(POS_X, i * 0.1f);
+                    h.handle().setFloat(POS_Y, i * 0.2f);
+                }
+                world.addComponent(e, PositionComponent.class, pos);
+
+                MemorySegment vel = manager.allocate(VelocityComponent.class, arena);
+                try(var h = manager.acquireBoundHandle(VelocityComponent.class, vel)) {
+                    h.handle().setFloat(VEL_VX, 1.0f);
+                    h.handle().setFloat(VEL_VY, -1.0f);
+                }
+                world.addComponent(e, VelocityComponent.class, vel);
+            }
+        }
+
+        @TearDown(Level.Trial)
+        public void teardown() {
+            world.close();
+            arena.close();
+        }
+    }
+
+    @Benchmark
+    public void throughput_MaximalIteration(ThroughputState state, Blackhole bh) {
+        // Measure raw iteration throughput
+        long sum = 0;
+        state.world.query()
+                .with(PositionComponent.class)
+                .with(VelocityComponent.class)
+                .forEachEntity((eid, handles, _) -> {
+                    bh.consume(eid);
+                });
+    }
+
+    @Benchmark
+    @BenchmarkMode(Mode.Throughput)
+    @OutputTimeUnit(TimeUnit.SECONDS)
+    public void throughput_EntitiesPerSecond(ThroughputState state) {
+        // Measure entities processed per second
+        state.world.query()
+                .with(PositionComponent.class)
+                .with(VelocityComponent.class)
+                .forEachEntity((_, handles, _) -> {
+                    float x = handles[0].getFloat(state.POS_X);
+                    float y = handles[0].getFloat(state.POS_Y);
+                    float vx = handles[1].getFloat(state.VEL_VX);
+                    float vy = handles[1].getFloat(state.VEL_VY);
+                    handles[0].setFloat(state.POS_X, x + vx);
+                    handles[0].setFloat(state.POS_Y, y + vy);
+                });
     }
 }

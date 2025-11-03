@@ -1,2 +1,3 @@
 com.ethnicthv.ecs.processor.ComponentProcessor
+com.ethnicthv.ecs.processor.QueryProcessor
 

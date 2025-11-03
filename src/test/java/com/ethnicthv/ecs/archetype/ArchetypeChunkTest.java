@@ -12,6 +12,7 @@ import java.lang.foreign.MemorySegment;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -404,6 +405,178 @@ public class ArchetypeChunkTest {
         assertThrows(IllegalArgumentException.class, () ->
                 new ArchetypeChunk(descriptors, elementSizes, 0, arena)
         );
+    }
+
+    @Test
+    void testLargeScaleAllocations_1000Entities() {
+        int capacity = 1024;
+        ArchetypeChunk chunk = new ArchetypeChunk(descriptors, elementSizes, capacity, arena);
+
+        // Allocate 1000 entities
+        int entityCount = 1000;
+        Set<Integer> allocatedSlots = new HashSet<>();
+        for (int i = 0; i < entityCount; i++) {
+            int slot = chunk.allocateSlot(10000 + i);
+            assertTrue(slot >= 0, "Should allocate slot for entity " + i);
+            assertTrue(allocatedSlots.add(slot), "Slot should be unique");
+            assertEquals(10000 + i, chunk.getEntityId(slot));
+        }
+
+        assertEquals(entityCount, chunk.size());
+        assertEquals(entityCount, allocatedSlots.size());
+
+        // Verify all allocated entities are accessible
+        int verifiedCount = 0;
+        for (int slot : allocatedSlots) {
+            int entityId = chunk.getEntityId(slot);
+            assertTrue(entityId >= 10000 && entityId < 10000 + entityCount);
+            verifiedCount++;
+        }
+        assertEquals(entityCount, verifiedCount);
+    }
+
+    @Test
+    void testLargeScaleAllocationsAndFrees_5000Operations() {
+        int capacity = 2048;
+        ArchetypeChunk chunk = new ArchetypeChunk(descriptors, elementSizes, capacity, arena);
+
+        // Perform 5000 mixed allocate/free operations
+        Set<Integer> activeSlots = new HashSet<>();
+        for (int i = 0; i < 5000; i++) {
+            if (i % 3 == 0 && !activeSlots.isEmpty()) {
+                // Free a random slot
+                Integer slotToFree = activeSlots.iterator().next();
+                chunk.freeSlot(slotToFree);
+                activeSlots.remove(slotToFree);
+            } else {
+                // Allocate new slot
+                int slot = chunk.allocateSlot(20000 + i);
+                if (slot >= 0) {
+                    activeSlots.add(slot);
+                }
+            }
+        }
+
+        // Verify chunk consistency
+        assertEquals(activeSlots.size(), chunk.size());
+
+        // Verify all active slots have valid entity IDs
+        for (int slot : activeSlots) {
+            int entityId = chunk.getEntityId(slot);
+            assertNotEquals(-1, entityId, "Active slot should have valid entity ID");
+        }
+    }
+
+    @Test
+    void testConcurrentAllocations_10000Entities() throws InterruptedException {
+        int capacity = 10240;
+        ArchetypeChunk chunk = new ArchetypeChunk(descriptors, elementSizes, capacity, arena);
+
+        int threads = 8;
+        int entitiesPerThread = 1250; // 8 * 1250 = 10000
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch doneLatch = new CountDownLatch(threads);
+        AtomicInteger successCount = new AtomicInteger(0);
+        Set<Integer> allEntityIds = ConcurrentHashMap.newKeySet();
+
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
+        try {
+            for (int t = 0; t < threads; t++) {
+                final int baseId = t * entitiesPerThread + 30000;
+                executor.submit(() -> {
+                    try {
+                        startLatch.await();
+                        for (int i = 0; i < entitiesPerThread; i++) {
+                            int entityId = baseId + i;
+                            int slot = chunk.allocateSlot(entityId);
+                            if (slot >= 0) {
+                                successCount.incrementAndGet();
+                                allEntityIds.add(entityId);
+                            }
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        doneLatch.countDown();
+                    }
+                });
+            }
+
+            startLatch.countDown();
+            assertTrue(doneLatch.await(30, TimeUnit.SECONDS), "Timed out waiting for allocations");
+        } finally {
+            executor.shutdown();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+
+        assertEquals(10000, successCount.get(), "Should successfully allocate 10000 entities");
+        assertEquals(10000, allEntityIds.size(), "All entity IDs should be unique");
+        assertEquals(10000, chunk.size());
+    }
+
+    @Test
+    void testConcurrentChurn_20000Operations() throws InterruptedException {
+        int capacity = 4096;
+        ArchetypeChunk chunk = new ArchetypeChunk(descriptors, elementSizes, capacity, arena);
+
+        int threads = 10;
+        int operationsPerThread = 2000; // 10 * 2000 = 20000
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch doneLatch = new CountDownLatch(threads);
+
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
+        try {
+            for (int t = 0; t < threads; t++) {
+                final int baseId = t * operationsPerThread + 40000;
+                executor.submit(() -> {
+                    try {
+                        startLatch.await();
+                        Set<Integer> mySlots = new HashSet<>();
+                        for (int i = 0; i < operationsPerThread; i++) {
+                            if (i % 4 == 0 && !mySlots.isEmpty()) {
+                                // Free one of our slots
+                                Integer slot = mySlots.iterator().next();
+                                chunk.freeSlot(slot);
+                                mySlots.remove(slot);
+                            } else {
+                                // Allocate new
+                                int slot = chunk.allocateSlot(baseId + i);
+                                if (slot >= 0) {
+                                    mySlots.add(slot);
+                                }
+                            }
+                        }
+                        // Clean up our remaining slots
+                        for (int slot : mySlots) {
+                            chunk.freeSlot(slot);
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        doneLatch.countDown();
+                    }
+                });
+            }
+
+            startLatch.countDown();
+            assertTrue(doneLatch.await(60, TimeUnit.SECONDS), "Timed out waiting for operations");
+        } finally {
+            executor.shutdown();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+
+        // After all threads clean up, chunk should be empty or have very few entities
+        int finalSize = chunk.size();
+        assertTrue(finalSize >= 0 && finalSize <= capacity);
+
+        // All slots marked as occupied should have valid entity IDs
+        int occupiedCount = 0;
+        for (int i = 0; i < capacity; i++) {
+            if (chunk.getEntityId(i) != -1) {
+                occupiedCount++;
+            }
+        }
+        assertEquals(finalSize, occupiedCount);
     }
 
     @Test

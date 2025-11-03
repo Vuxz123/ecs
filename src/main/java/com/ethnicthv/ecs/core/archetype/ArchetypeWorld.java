@@ -1,8 +1,10 @@
 package com.ethnicthv.ecs.core.archetype;
 
 
+import com.ethnicthv.ecs.core.api.archetype.IQueryBuilder;
 import com.ethnicthv.ecs.core.components.ComponentDescriptor;
 import com.ethnicthv.ecs.core.components.ComponentManager;
+import com.ethnicthv.ecs.core.components.ManagedComponentStore;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -24,6 +26,8 @@ public final class ArchetypeWorld implements AutoCloseable {
     private final Arena arena;
     private final AtomicInteger nextEntityId = new AtomicInteger(1);
     private final AtomicInteger nextComponentTypeId = new AtomicInteger(0);
+    // New: global store for managed components
+    private final ManagedComponentStore managedStore = new ManagedComponentStore();
 
     public ArchetypeWorld(ComponentManager componentManager) {
         this.arena = Arena.ofShared();
@@ -137,13 +141,19 @@ public final class ArchetypeWorld implements AutoCloseable {
         ArchetypeChunk.ChunkLocation location = archetype.addEntity(entityId);
         entityRecords.put(entityId, new EntityRecord(archetype, location, mask));
 
-        // 5. Allocate and assign default (zeroed) memory for each component
+        // 5. Allocate and assign default (zeroed) memory for each unmanaged component
         for (Class<?> componentClass : componentClasses) {
             Integer componentTypeId = getComponentTypeId(componentClass);
             if (componentTypeId != null) {
-                MemorySegment data = componentManager.allocate(componentClass, arena); // Zeroed by default
-                int componentIndex = archetype.indexOfComponentType(componentTypeId);
-                archetype.setComponentData(location, componentIndex, data);
+                ComponentDescriptor desc = componentManager.getDescriptor(componentClass);
+                if (desc != null && !desc.isManaged()) {
+                    MemorySegment data = componentManager.allocate(componentClass, arena); // Zeroed by default
+                    int componentIndex = archetype.indexOfComponentType(componentTypeId);
+                    if (componentIndex >= 0) {
+                        archetype.setComponentData(location, componentIndex, data);
+                    }
+                }
+                // For managed components, default ticket remains -1 until user provides an instance
             }
         }
 
@@ -151,7 +161,7 @@ public final class ArchetypeWorld implements AutoCloseable {
     }
 
     /**
-     * Add a component to an entity
+     * Add a component to an entity (unmanaged path: memory segment).
      */
     public <T> void addComponent(int entityId, Class<T> componentClass, MemorySegment data) {
         EntityRecord record = entityRecords.get(entityId);
@@ -162,6 +172,10 @@ public final class ArchetypeWorld implements AutoCloseable {
         Integer componentTypeId = componentTypeIds.get(componentClass);
         if (componentTypeId == null) {
             throw new IllegalArgumentException("Component type " + componentClass + " not registered");
+        }
+        ComponentDescriptor desc = componentManager.getDescriptor(componentClass);
+        if (desc != null && desc.isManaged()) {
+            throw new IllegalArgumentException("addComponent(entityId, Class, MemorySegment) not valid for managed component " + componentClass.getName());
         }
 
         // Create new mask with the additional component
@@ -177,7 +191,48 @@ public final class ArchetypeWorld implements AutoCloseable {
     }
 
     /**
-     * Remove a component from an entity
+     * Add a managed component instance to an entity. The instance is stored in the ManagedComponentStore
+     * and the ticket is placed into the chunk's managed index array.
+     */
+    public <T> void addComponent(int entityId, T componentInstance) {
+        if (componentInstance == null) throw new IllegalArgumentException("componentInstance must not be null");
+        Class<?> componentClass = componentInstance.getClass();
+
+        EntityRecord record = entityRecords.get(entityId);
+        if (record == null) {
+            throw new IllegalArgumentException("Entity " + entityId + " does not exist");
+        }
+
+        Integer componentTypeId = componentTypeIds.get(componentClass);
+        if (componentTypeId == null) {
+            throw new IllegalArgumentException("Component type " + componentClass + " not registered");
+        }
+
+        ComponentDescriptor desc = componentManager.getDescriptor(componentClass);
+        if (desc == null || !desc.isManaged()) {
+            throw new IllegalArgumentException("Component " + componentClass.getName() + " is not marked @Component.Managed");
+        }
+
+        // 1) Store managed instance and get ticket
+        int ticket = managedStore.store(componentInstance);
+
+        // 2) Structural change: move entity to new archetype that includes this component
+        ComponentMask newMask = record.mask.set(componentTypeId);
+        moveEntityToArchetype(entityId, record, newMask);
+
+        // 3) Wire ticket into the new chunk's managed index array
+        EntityRecord newRecord = entityRecords.get(entityId);
+        int managedTypeIndex = newRecord.archetype.getManagedTypeIndex(componentTypeId);
+        if (managedTypeIndex < 0) {
+            // Should not happen if descriptor is managed and mask includes it
+            throw new IllegalStateException("Managed type index not found for component id=" + componentTypeId);
+        }
+        ArchetypeChunk chunk = newRecord.archetype.getChunk(newRecord.location.chunkIndex);
+        chunk.setManagedTicket(managedTypeIndex, newRecord.location.indexInChunk, ticket);
+    }
+
+    /**
+     * Remove a component from an entity. For managed components, release the stored object.
      */
     public <T> void removeComponent(int entityId, Class<T> componentClass) {
         EntityRecord record = entityRecords.get(entityId);
@@ -188,6 +243,19 @@ public final class ArchetypeWorld implements AutoCloseable {
         Integer componentTypeId = componentTypeIds.get(componentClass);
         if (componentTypeId == null || !record.mask.has(componentTypeId)) {
             return; // Component doesn't exist on this entity
+        }
+
+        // If managed, release the ticket before moving
+        ComponentDescriptor desc = componentManager.getDescriptor(componentClass);
+        if (desc != null && desc.isManaged()) {
+            int managedIdx = record.archetype.getManagedTypeIndex(componentTypeId);
+            if (managedIdx >= 0) {
+                ArchetypeChunk chunk = record.archetype.getChunk(record.location.chunkIndex);
+                int ticket = chunk.getManagedTicket(managedIdx, record.location.indexInChunk);
+                if (ticket >= 0) {
+                    managedStore.release(ticket);
+                }
+            }
         }
 
         // Create new mask without the component
@@ -234,14 +302,28 @@ public final class ArchetypeWorld implements AutoCloseable {
     public void destroyEntity(int entityId) {
         EntityRecord record = entityRecords.remove(entityId);
         if (record != null) {
+            // Release all managed tickets for this entity before removing
+            int[] managedIds = record.archetype.getManagedTypeIds();
+            if (managedIds != null && managedIds.length > 0) {
+                ArchetypeChunk chunk = record.archetype.getChunk(record.location.chunkIndex);
+                for (int i = 0; i < managedIds.length; i++) {
+                    int ticket = chunk.getManagedTicket(i, record.location.indexInChunk);
+                    if (ticket >= 0) managedStore.release(ticket);
+                }
+            }
             record.archetype.removeEntity(record.location);
         }
     }
 
     /**
-     * Create a query for entities matching component requirements
+     * Create a query builder for entities matching component requirements.
+     * <p>
+     * Returns a builder that can be configured with component requirements,
+     * then built into an immutable {@link com.ethnicthv.ecs.core.api.archetype.IQuery}.
+     *
+     * @return a new query builder
      */
-    public ArchetypeQuery query() {
+    public IQueryBuilder query() {
         return new ArchetypeQuery(this);
     }
 
@@ -284,13 +366,62 @@ public final class ArchetypeWorld implements AutoCloseable {
         return componentManager;
     }
 
+    /**
+     * Retrieve a managed component instance for an entity, or null if absent.
+     */
+    @SuppressWarnings("unchecked")
+    public <T> T getManagedComponent(int entityId, Class<T> componentClass) {
+        EntityRecord record = entityRecords.get(entityId);
+        if (record == null) return null;
+        Integer typeId = componentTypeIds.get(componentClass);
+        if (typeId == null || !record.mask.has(typeId)) return null;
+        ComponentDescriptor desc = componentManager.getDescriptor(componentClass);
+        if (desc == null || !desc.isManaged()) return null;
+        int mIdx = record.archetype.getManagedTypeIndex(typeId);
+        if (mIdx < 0) return null;
+        ArchetypeChunk chunk = record.archetype.getChunk(record.location.chunkIndex);
+        int ticket = chunk.getManagedTicket(mIdx, record.location.indexInChunk);
+        if (ticket < 0) return null;
+        Object obj = managedStore.get(ticket);
+        return (T) obj;
+    }
+
+    /**
+     * Replace or set a managed component instance for an entity.
+     * If an old instance exists, its ticket is released; the new instance is stored and wired.
+     */
+    public <T> void setManagedComponent(int entityId, T newInstance) {
+        if (newInstance == null) throw new IllegalArgumentException("newInstance must not be null");
+        Class<?> componentClass = newInstance.getClass();
+        Integer typeId = componentTypeIds.get(componentClass);
+        if (typeId == null) throw new IllegalArgumentException("Component type not registered: " + componentClass.getName());
+        ComponentDescriptor desc = componentManager.getDescriptor(componentClass);
+        if (desc == null || !desc.isManaged()) {
+            throw new IllegalArgumentException("Component is not managed: " + componentClass.getName());
+        }
+        EntityRecord record = entityRecords.get(entityId);
+        if (record == null || !record.mask.has(typeId)) {
+            // If not present, this behaves like addComponent(entityId, instance)
+            addComponent(entityId, newInstance);
+            return;
+        }
+        // Release old ticket (if any)
+        int mIdx = record.archetype.getManagedTypeIndex(typeId);
+        ArchetypeChunk chunk = record.archetype.getChunk(record.location.chunkIndex);
+        int oldTicket = chunk.getManagedTicket(mIdx, record.location.indexInChunk);
+        if (oldTicket >= 0) managedStore.release(oldTicket);
+        // Store new instance and set ticket
+        int newTicket = managedStore.store(newInstance);
+        chunk.setManagedTicket(mIdx, record.location.indexInChunk, newTicket);
+    }
+
     // ============ Internal Methods ============
 
     private void moveEntityToArchetype(int entityId, EntityRecord oldRecord, ComponentMask newMask) {
         // Delegate archetype construction to ArchetypeManager
         Archetype newArchetype = archetypeManager.getOrCreateArchetype(newMask);
 
-        // Copy existing component data (only components present in both)
+        // Copy existing unmanaged component data (only components present in both)
         ArchetypeChunk.ChunkLocation newLocation = newArchetype.addEntity(entityId);
         int[] componentIds = newMask.toComponentIdArray();
         for (int componentTypeId : componentIds) {
@@ -306,7 +437,27 @@ public final class ArchetypeWorld implements AutoCloseable {
             }
         }
 
-        // Remove from old archetype
+        // Transfer managed tickets for intersection of managed types
+        int[] oldManaged = oldRecord.archetype.getManagedTypeIds();
+        int[] newManaged = newArchetype.getManagedTypeIds();
+        if (oldManaged != null && newManaged != null && oldManaged.length > 0 && newManaged.length > 0) {
+            ArchetypeChunk oldChunk = oldRecord.archetype.getChunk(oldRecord.location.chunkIndex);
+            ArchetypeChunk newChunk = newArchetype.getChunk(newLocation.chunkIndex);
+            for (int tid : oldManaged) {
+                // If this managed component remains present in new archetype
+                // We check presence via getManagedTypeIndex
+                int oldMIdx = oldRecord.archetype.getManagedTypeIndex(tid);
+                int newMIdx = newArchetype.getManagedTypeIndex(tid);
+                if (oldMIdx >= 0 && newMIdx >= 0) {
+                    int ticket = oldChunk.getManagedTicket(oldMIdx, oldRecord.location.indexInChunk);
+                    if (ticket >= 0) {
+                        newChunk.setManagedTicket(newMIdx, newLocation.indexInChunk, ticket);
+                    }
+                }
+            }
+        }
+
+        // Remove from old archetype (also clears managed tickets via zeroing)
         oldRecord.archetype.removeEntity(oldRecord.location);
 
         // Update entity record

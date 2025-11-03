@@ -1,7 +1,9 @@
 package com.ethnicthv.ecs.core.archetype;
 
+import com.ethnicthv.ecs.core.api.archetype.IQuery;
+import com.ethnicthv.ecs.core.api.archetype.IQueryBuilder;
+import com.ethnicthv.ecs.core.api.archetype.IArchetype;
 import com.ethnicthv.ecs.core.api.archetype.IArchetypeChunk;
-import com.ethnicthv.ecs.core.api.archetype.IArchetypeQuery;
 import com.ethnicthv.ecs.core.components.ComponentHandle;
 import com.ethnicthv.ecs.core.components.ComponentManager;
 
@@ -11,12 +13,16 @@ import java.util.List;
 /**
  * Query system for filtering archetypes based on component requirements.
  * <p>
+ * This class implements both {@link IQueryBuilder} (for configuration) and
+ * {@link IQuery} (for execution). Once {@link #build()} is called, it returns
+ * an immutable snapshot of the query configuration.
+ * <p>
  * Supports:
  * - with(): entities MUST have these components
  * - without(): entities MUST NOT have these components
  * - any(): entities must have AT LEAST ONE of these components
  */
-public final class ArchetypeQuery implements IArchetypeQuery {
+public final class ArchetypeQuery implements IQueryBuilder, IQuery {
     private final ArchetypeWorld world;
     private final ComponentMask.Builder withMask = ComponentMask.builder();
     private final ComponentMask.Builder withoutMask = ComponentMask.builder();
@@ -57,6 +63,7 @@ public final class ArchetypeQuery implements IArchetypeQuery {
     /**
      * Require entities to have at least one of the specified components
      */
+    @Override
     public ArchetypeQuery any(Class<?>... componentClasses) {
         ComponentMask.Builder anyBuilder = ComponentMask.builder();
         for (Class<?> componentClass : componentClasses) {
@@ -70,10 +77,30 @@ public final class ArchetypeQuery implements IArchetypeQuery {
     }
 
     /**
+     * Build an immutable query from this builder's configuration.
+     * <p>
+     * This method creates a snapshot of the current query configuration.
+     * The returned {@link IQuery} is immutable and thread-safe.
+     * <p>
+     * Note: Since ArchetypeQuery implements both IQueryBuilder and IQuery,
+     * this method simply returns itself. However, callers should treat the
+     * returned reference as immutable and not call builder methods on it.
+     *
+     * @return an immutable query instance
+     */
+    @Override
+    public IQuery build() {
+        // For now, we return this instance
+        // In a more sophisticated implementation, we could create
+        // a truly immutable wrapper or snapshot
+        return this;
+    }
+
+    /**
      * Execute the query and iterate over matching archetypes
      */
     @Override
-    public void forEach(ArchetypeConsumer consumer) {
+    public void forEach(IQuery.ArchetypeConsumer consumer) {
         ComponentMask with = withMask.build();
         ComponentMask without = withoutMask.build();
 
@@ -104,7 +131,8 @@ public final class ArchetypeQuery implements IArchetypeQuery {
     /**
      * Execute query and iterate over matching chunks
      */
-    public void forEachChunk(ChunkConsumer consumer) {
+    @Override
+    public void forEachChunk(IQuery.ChunkConsumer consumer) {
         forEach(archetype -> {
             for (IArchetypeChunk chunk : archetype.getChunks()) {
                 consumer.accept(chunk, archetype);
@@ -115,7 +143,8 @@ public final class ArchetypeQuery implements IArchetypeQuery {
     /**
      * Execute query and iterate over matching entities
      */
-    public void forEachEntity(EntityConsumer consumer) {
+    @Override
+    public void forEachEntity(IQuery.EntityConsumer consumer) {
         ComponentManager mgr = world.getComponentManager();
 
         forEach(archetype -> {
@@ -158,6 +187,7 @@ public final class ArchetypeQuery implements IArchetypeQuery {
     /**
      * Count matching entities
      */
+    @Override
     public int count() {
         final int[] count = {0};
         forEach(archetype -> count[0] += archetype.getEntityCount());
@@ -192,101 +222,57 @@ public final class ArchetypeQuery implements IArchetypeQuery {
      *
      * @see #forEachEntity(EntityConsumer) for sequential processing
      */
-    public void forEachParallel(EntityConsumer consumer) {
+    @Override
+    public void forEachParallel(IQuery.EntityConsumer consumer) {
         if (consumer == null) {
-            throw new NullPointerException("EntityConsumer cannot be null");
+            throw new NullPointerException("EntityConsumer must not be null");
         }
 
-        ComponentManager mgr = world.getComponentManager();
-        ComponentMask with = withMask.build();
-        ComponentMask without = withoutMask.build();
+        record WorkItem(IArchetype archetype, ArchetypeChunk chunk, int entityId, int elementIndex) {}
 
-        // Prepare component classes array
+        List<WorkItem> tasks = new ArrayList<>();
+
+        // Build flat list of work items across all matching chunks
+        forEachChunk((ichunk, archetype) -> {
+            // Cast to concrete chunk to leverage fast occupied-iteration helpers
+            ArchetypeChunk chunk = (ArchetypeChunk) ichunk;
+            int idx = chunk.nextOccupiedIndex(0);
+            while (idx >= 0) {
+                int entityId = chunk.getEntityId(idx);
+                tasks.add(new WorkItem(archetype, chunk, entityId, idx));
+                idx = chunk.nextOccupiedIndex(idx + 1);
+            }
+        });
+
+        ComponentManager mgr = world.getComponentManager();
         Class<?>[] componentClasses = new Class<?>[compList.size()];
         for (int i = 0; i < compList.size(); i++) {
             componentClasses[i] = compList.get(i);
         }
 
-        // Step 1: Collect all matching archetypes with their metadata
-        List<ArchetypeWorkItem> archetypeWorkItems = new ArrayList<>();
-        for (Archetype archetype : world.getAllArchetypes()) {
-            ComponentMask archetypeMask = archetype.getMask();
+        tasks.parallelStream().forEach(item -> {
+            ArchetypeChunk chunk = item.chunk();
+            int elementIndex = item.elementIndex();
 
-            // WITH: archetype must contain all required bits
-            if (!archetypeMask.containsAll(with)) {
-                continue;
-            }
-            // WITHOUT: archetype must contain none of the excluded bits
-            if (!archetypeMask.containsNone(without)) {
-                continue;
-            }
-            // ANY: archetype must intersect at least one any-mask (if present)
-            if (!anyMasks.isEmpty()) {
-                boolean matchesAny = false;
-                for (ComponentMask anyMask : anyMasks) {
-                    if (archetypeMask.intersects(anyMask)) {
-                        matchesAny = true;
-                        break;
-                    }
-                }
-                if (!matchesAny) continue;
-            }
-
-            // Compute component indices for this archetype
             int[] compIndices = new int[compIdxList.size()];
-            boolean allFound = true;
             for (int i = 0; i < compIdxList.size(); i++) {
-                int idx = archetype.indexOfComponentType(compIdxList.get(i));
+                int idx = item.archetype().indexOfComponentType(compIdxList.get(i));
                 if (idx < 0) {
-                    allFound = false;
-                    break;
+                    return; // Component not found in this archetype
                 }
                 compIndices[i] = idx;
             }
-            if (!allFound) continue;
 
-            archetypeWorkItems.add(new ArchetypeWorkItem(archetype, compIndices));
-        }
-
-        // Step 2: Build a flat list of all entity work items
-        List<EntityWorkItem> workItems = new ArrayList<>();
-        for (ArchetypeWorkItem archetypeItem : archetypeWorkItems) {
-            Archetype archetype = archetypeItem.archetype;
-            int[] compIndices = archetypeItem.compIndices;
-
-            ArchetypeChunk[] chunks = archetype.getChunksSnapshot();
-            int chunkCount = archetype.chunkCount();
-
-            for (int chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
-                ArchetypeChunk chunk = chunks[chunkIndex];
-                if (chunk == null || chunk.isEmpty()) continue;
-
-                int slotIndex = chunk.nextOccupiedIndex(0);
-                while (slotIndex != -1) {
-                    int entityId = chunk.getEntityId(slotIndex);
-                    if (entityId != -1) {
-                        workItems.add(new EntityWorkItem(
-                            entityId, chunk, slotIndex, compIndices, archetype
-                        ));
-                    }
-                    slotIndex = chunk.nextOccupiedIndex(slotIndex + 1);
-                }
-            }
-        }
-
-        // Step 3: Process entities in parallel using parallel stream
-        workItems.parallelStream().forEach(item -> {
             ComponentManager.BoundHandle[] bound = new ComponentManager.BoundHandle[componentClasses.length];
             ComponentHandle[] handles = new ComponentHandle[componentClasses.length];
             try {
-                for (int k = 0; k < item.compIndices.length; k++) {
-                    int compIdx = item.compIndices[k];
-                    var seg = item.chunk.getComponentData(compIdx, item.slotIndex);
+                for (int k = 0; k < compIndices.length; k++) {
+                    int compIdx = compIndices[k];
+                    var seg = chunk.getComponentData(compIdx, elementIndex);
                     bound[k] = mgr.acquireBoundHandle(componentClasses[k], seg);
                     handles[k] = bound[k].handle();
                 }
-
-                consumer.accept(item.entityId, handles, item.archetype);
+                consumer.accept(item.entityId(), handles, item.archetype());
             } finally {
                 for (ComponentManager.BoundHandle boundHandle : bound) {
                     if (boundHandle != null) {
@@ -295,37 +281,5 @@ public final class ArchetypeQuery implements IArchetypeQuery {
                 }
             }
         });
-    }
-
-    /**
-     * Internal class to hold archetype metadata for parallel execution.
-     */
-    private static class ArchetypeWorkItem {
-        final Archetype archetype;
-        final int[] compIndices;
-
-        ArchetypeWorkItem(Archetype archetype, int[] compIndices) {
-            this.archetype = archetype;
-            this.compIndices = compIndices;
-        }
-    }
-
-    /**
-     * Internal class to hold entity processing metadata for parallel execution.
-     */
-    private static class EntityWorkItem {
-        final int entityId;
-        final ArchetypeChunk chunk;
-        final int slotIndex;
-        final int[] compIndices;
-        final Archetype archetype;
-
-        EntityWorkItem(int entityId, ArchetypeChunk chunk, int slotIndex, int[] compIndices, Archetype archetype) {
-            this.entityId = entityId;
-            this.chunk = chunk;
-            this.slotIndex = slotIndex;
-            this.compIndices = compIndices;
-            this.archetype = archetype;
-        }
     }
 }

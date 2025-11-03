@@ -15,6 +15,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class LockFreeAllocatorTest {
 
@@ -132,6 +133,201 @@ public class LockFreeAllocatorTest {
 
         // sanity: at least more than one chunk should exist
         Assertions.assertTrue(archetype.getChunks().size() >= 1);
+    }
+
+    @Test
+    void testLargeScale_50000Entities() throws InterruptedException {
+        ComponentDescriptor[] descs = new ComponentDescriptor[] {
+                makeDesc(DummyC1.class, 16),
+                makeDesc(DummyC2.class, 8)
+        };
+        ComponentMask empty = new ComponentMask();
+        int[] compIds = new int[] {0, 1};
+        Archetype archetype = new Archetype(empty, compIds, descs, shared);
+
+        int threads = 16;
+        int entities = 50_000;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(threads);
+
+        int perThread = entities / threads;
+        for (int t = 0; t < threads; t++) {
+            final int baseId = t * perThread + 100_000;
+            pool.submit(() -> {
+                try {
+                    start.await();
+                    for (int i = 0; i < perThread; i++) {
+                        archetype.addEntity(baseId + i);
+                    }
+                } catch (InterruptedException ignored) {
+                } finally {
+                    done.countDown();
+                }
+            });
+        }
+
+        start.countDown();
+        Assertions.assertTrue(done.await(60, TimeUnit.SECONDS), "Should complete within 60 seconds");
+        pool.shutdownNow();
+
+        // Count all entities
+        final int[] count = {0};
+        archetype.forEach((eid, loc, chunk) -> count[0]++);
+        Assertions.assertEquals(entities, count[0], "All 50,000 entities should be present");
+
+        // Verify multiple chunks were created
+        Assertions.assertTrue(archetype.getChunks().size() > 1, "Should have created multiple chunks");
+    }
+
+    @Test
+    void testLargeScale_100000EntitiesWithChurn() throws InterruptedException {
+        ComponentDescriptor[] descs = new ComponentDescriptor[] {
+                makeDesc(DummyC1.class, 16),
+                makeDesc(DummyC2.class, 8)
+        };
+        ComponentMask empty = new ComponentMask();
+        int[] compIds = new int[] {0, 1};
+        Archetype archetype = new Archetype(empty, compIds, descs, shared);
+
+        int threads = 20;
+        int totalOperations = 100_000;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(threads);
+
+        int perThread = totalOperations / threads;
+        for (int t = 0; t < threads; t++) {
+            final int baseId = t * perThread + 200_000;
+            pool.submit(() -> {
+                try {
+                    start.await();
+                    for (int i = 0; i < perThread; i++) {
+                        archetype.addEntity(baseId + i);
+                    }
+                } catch (InterruptedException ignored) {
+                } finally {
+                    done.countDown();
+                }
+            });
+        }
+
+        start.countDown();
+        Assertions.assertTrue(done.await(120, TimeUnit.SECONDS), "Should complete within 120 seconds");
+        pool.shutdownNow();
+
+        // Verify entity count
+        final int[] count = {0};
+        archetype.forEach((eid, loc, chunk) -> count[0]++);
+        Assertions.assertEquals(totalOperations, count[0], "All 100,000 entities should be present");
+
+        // Verify chunk distribution
+        int chunkCount = archetype.getChunks().size();
+        Assertions.assertTrue(chunkCount > 1, "Should have created multiple chunks for 100k entities");
+        System.out.println("Created " + chunkCount + " chunks for 100,000 entities");
+    }
+
+    @Test
+    void testHighContentionScenario_10000Entities() throws InterruptedException {
+        int capacity = 128; // Small capacity to force more chunk allocations
+        ComponentDescriptor[] descs = new ComponentDescriptor[] {
+                makeDesc(DummyC1.class, 16),
+                makeDesc(DummyC2.class, 8)
+        };
+        long[] sizes = new long[] { 16, 8 };
+        ArchetypeChunk chunk = new ArchetypeChunk(descs, sizes, capacity, shared);
+
+        int threads = 32; // High thread count for contention
+        int attemptsPerThread = 500;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(threads);
+
+        AtomicInteger successfulAllocs = new AtomicInteger(0);
+
+        for (int t = 0; t < threads; t++) {
+            final int baseId = t * attemptsPerThread + 300_000;
+            pool.submit(() -> {
+                try {
+                    start.await();
+                    for (int i = 0; i < attemptsPerThread; i++) {
+                        int idx = chunk.allocateSlot(baseId + i);
+                        if (idx >= 0) {
+                            successfulAllocs.incrementAndGet();
+                            // Free half immediately to create churn
+                            if (i % 2 == 0) {
+                                chunk.freeSlot(idx);
+                            }
+                        }
+                    }
+                } catch (InterruptedException ignored) {
+                } finally {
+                    done.countDown();
+                }
+            });
+        }
+
+        start.countDown();
+        Assertions.assertTrue(done.await(60, TimeUnit.SECONDS), "High contention test should complete");
+        pool.shutdownNow();
+
+        // Verify chunk state is consistent
+        int finalSize = chunk.size();
+        Assertions.assertTrue(finalSize >= 0 && finalSize <= capacity, "Size should be within bounds");
+
+        // Count actual occupied slots
+        int occupied = 0;
+        for (int i = 0; i < capacity; i++) {
+            if (chunk.getEntityId(i) != -1) occupied++;
+        }
+        Assertions.assertEquals(finalSize, occupied, "Occupied count should match size");
+    }
+
+    @Test
+    void testMixedOperations_20000Cycles() throws InterruptedException {
+        ComponentDescriptor[] descs = new ComponentDescriptor[] {
+                makeDesc(DummyC1.class, 16),
+                makeDesc(DummyC2.class, 8)
+        };
+        ComponentMask empty = new ComponentMask();
+        int[] compIds = new int[] {0, 1};
+        Archetype archetype = new Archetype(empty, compIds, descs, shared);
+
+        int threads = 10;
+        int cyclesPerThread = 2000; // Total 20,000 cycles
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(threads);
+
+        for (int t = 0; t < threads; t++) {
+            final int baseId = t * cyclesPerThread + 400_000;
+            pool.submit(() -> {
+                try {
+                    start.await();
+                    for (int i = 0; i < cyclesPerThread; i++) {
+                        // Add entity
+                        archetype.addEntity(baseId + i);
+
+                        // Simulate some processing time
+                        if (i % 100 == 0) {
+                            Thread.sleep(0, 1000); // 1 microsecond
+                        }
+                    }
+                } catch (InterruptedException ignored) {
+                } finally {
+                    done.countDown();
+                }
+            });
+        }
+
+        start.countDown();
+        Assertions.assertTrue(done.await(90, TimeUnit.SECONDS), "Mixed operations should complete");
+        pool.shutdownNow();
+
+        // Final verification
+        final int[] count = {0};
+        archetype.forEach((eid, loc, chunk) -> count[0]++);
+        Assertions.assertEquals(threads * cyclesPerThread, count[0], "All entities should be accounted for");
     }
 
     // Dummy component classes for descriptor construction

@@ -1,11 +1,12 @@
 package com.ethnicthv.ecs.demo;
 
-import com.ethnicthv.ecs.core.api.archetype.IArchetypeQuery;
-import com.ethnicthv.ecs.core.archetype.ArchetypeQuery;
+import com.ethnicthv.ecs.core.api.archetype.IQuery;
 import com.ethnicthv.ecs.core.archetype.ArchetypeWorld;
+import com.ethnicthv.ecs.core.components.ComponentHandle;
 import com.ethnicthv.ecs.core.components.ComponentManager;
 import com.ethnicthv.ecs.core.system.ExecutionMode;
-import com.ethnicthv.ecs.core.system.Query;
+import com.ethnicthv.ecs.core.system.annotation.Component;
+import com.ethnicthv.ecs.core.system.annotation.Query;
 import com.ethnicthv.ecs.core.system.SystemManager;
 
 import java.lang.foreign.MemorySegment;
@@ -57,13 +58,13 @@ public class SystemAPIDemo {
 
         // Run movement system (PARALLEL)
         long startTime = System.nanoTime();
-        movementSystem.update(0.016f); // 60 FPS
+        movementSystem.update(); // 60 FPS
         long movementTime = System.nanoTime() - startTime;
         System.out.printf("MovementSystem (PARALLEL): %.2f ms%n", movementTime / 1_000_000.0);
 
         // Run health system (SEQUENTIAL)
         startTime = System.nanoTime();
-        healthSystem.update(0.016f);
+        healthSystem.update();
         long healthTime = System.nanoTime() - startTime;
         System.out.printf("HealthRegenerationSystem (SEQUENTIAL): %.2f ms%n", healthTime / 1_000_000.0);
 
@@ -78,31 +79,34 @@ public class SystemAPIDemo {
      */
     static class MovementSystem {
         // This query will execute in PARALLEL automatically!
+        public IQuery movingEntities;
+
+        void update() {
+            // New API: single entrypoint
+            movingEntities.runQuery();
+        }
+
         @Query(
-            mode = ExecutionMode.PARALLEL,
-            with = {PositionComponent.class, VelocityComponent.class}
+                fieldInject = "movingEntities",
+                mode = ExecutionMode.SEQUENTIAL, // Explicit but could be omitted (it's default)
+                with = HealthComponent.class
         )
-        public IArchetypeQuery movingEntities;
+        private void query(
+                @Component(type = VelocityComponent.class) ComponentHandle velocityHandle,
+                @Component(type = PositionComponent.class) ComponentHandle locationHandle
+        ) {
+            float vx = VelocityComponentAccess.getVx(velocityHandle);
+            float vy = VelocityComponentAccess.getVy(velocityHandle);
 
-        void update(float deltaTime) {
-            // forEachEntity will automatically run in parallel due to mode = PARALLEL
-            movingEntities.forEachEntity((entityId, handles, archetype) -> {
-                var locationHandle = handles[0]; // PositionComponent
-                var velocityHandle = handles[1]; // VelocityComponent
+            float x = PositionComponentAccess.getX(locationHandle);
+            float y = PositionComponentAccess.getY(locationHandle);
 
-                float vx = VelocityComponentAccess.getVx(velocityHandle);
-                float vy = VelocityComponentAccess.getVy(velocityHandle);
+            x += vx * 0.1f;
+            y += vy * 0.1f;
 
-                float x = PositionComponentAccess.getX(locationHandle);
-                float y = PositionComponentAccess.getY(locationHandle);
-
-                x += vx * deltaTime;
-                y += vy * deltaTime;
-
-                // Write back
-                PositionComponentAccess.setX(locationHandle, x);
-                PositionComponentAccess.setY(locationHandle, y);
-            });
+            // Write back
+            PositionComponentAccess.setX(locationHandle, x);
+            PositionComponentAccess.setY(locationHandle, y);
         }
     }
 
@@ -111,26 +115,27 @@ public class SystemAPIDemo {
      * Demonstrates that SEQUENTIAL is still the default and works as expected.
      */
     static class HealthRegenerationSystem {
+        private IQuery healthyEntities;
+
+        void update() {
+            healthyEntities.runQuery();
+        }
+
         @Query(
-            mode = ExecutionMode.SEQUENTIAL, // Explicit but could be omitted (it's default)
-            with = HealthComponent.class
+                fieldInject = "healthyEntities",
+                mode = ExecutionMode.SEQUENTIAL, // Explicit but could be omitted (it's default)
+                with = HealthComponent.class
         )
-        private ArchetypeQuery healthyEntities;
+        private void query(
+                @Component(type = HealthComponent.class) ComponentHandle healthHandle
+        ) {
+            int health = HealthComponentAccess.getCurrentHealth(healthHandle);
+            int maxHealth = HealthComponentAccess.getMaxHealth(healthHandle);
 
-        void update(float deltaTime) {
-            // This executes sequentially
-            healthyEntities.forEachEntity((entityId, handles, archetype) -> {
-                var healthHandle = handles[0];
-
-                int health = HealthComponentAccess.getCurrentHealth(healthHandle);
-                int maxHealth = HealthComponentAccess.getMaxHealth(healthHandle);
-
-                if (health < maxHealth) {
-                    health = Math.min(maxHealth, health + (int) (10 * deltaTime));
-                    HealthComponentAccess.setCurrentHealth(healthHandle, health);
-                }
-            });
+            if (health < maxHealth) {
+                health = Math.min(maxHealth, health + (int) (10 * 0.1f));
+                HealthComponentAccess.setCurrentHealth(healthHandle, health);
+            }
         }
     }
 }
-

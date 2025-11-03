@@ -1,4 +1,7 @@
-package com.ethnicthv.ecs.core.system;
+package com.ethnicthv.ecs.core.system.annotation;
+
+import com.ethnicthv.ecs.core.system.ExecutionMode;
+import com.ethnicthv.ecs.core.system.SystemManager;
 
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
@@ -31,7 +34,7 @@ import java.lang.annotation.Target;
  * @see SystemManager
  */
 @Retention(RetentionPolicy.RUNTIME)
-@Target(ElementType.FIELD)
+@Target(ElementType.METHOD)
 public @interface Query {
     /**
      * Specifies the execution mode for this query.
@@ -73,5 +76,7 @@ public @interface Query {
      * @return array of optional component classes (default: empty)
      */
     Class<?>[] any() default {};
+
+    String fieldInject();
 }
 

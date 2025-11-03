@@ -27,6 +27,12 @@ public final class Archetype implements IArchetype {
     private final ComponentMask mask; // cached mask
     private final Arena arena; // arena for new chunk allocations
 
+    // Optional: full component ids including managed (only set by managed-aware ctor)
+    private final int[] allComponentTypeIds;
+    // Managed component state (only used when managed types are present)
+    private final int[] managedTypeIds;
+    private final ConcurrentHashMap<Integer, Integer> managedIndexMap = new ConcurrentHashMap<>();
+
     // Cache-friendly chunk storage
     private volatile ArchetypeChunk[] chunks;
     private final AtomicInteger chunkCount = new AtomicInteger(0); // also acts as publish barrier
@@ -58,6 +64,8 @@ public final class Archetype implements IArchetype {
         this.componentElementSizes = new long[descriptors.length];
         this.mask = mask; // store provided mask
         this.arena = arena;
+        this.allComponentTypeIds = null; // unmanaged-only ctor
+        this.managedTypeIds = new int[0];
 
         long totalPerEntity = 0;
         for (int i = 0; i < descriptors.length; i++) {
@@ -86,6 +94,42 @@ public final class Archetype implements IArchetype {
         }
     }
 
+    // Managed-aware constructor: descriptors contain ONLY unmanaged components, managedTypeIds are separate; allComponentTypeIds includes both
+    public Archetype(ComponentMask mask, int[] allComponentTypeIds, ComponentDescriptor[] unmanagedDescriptors, int[] managedTypeIds, Arena arena) {
+        this.mask = mask;
+        this.allComponentTypeIds = allComponentTypeIds;
+        this.managedTypeIds = managedTypeIds != null ? managedTypeIds.clone() : new int[0];
+        this.componentIds = new int[unmanagedDescriptors.length]; // will be populated via setUnmanagedTypeIds
+        this.descriptors = unmanagedDescriptors;
+        this.componentElementSizes = new long[unmanagedDescriptors.length];
+        this.arena = arena;
+
+        long totalPerEntity = 0;
+        for (int i = 0; i < unmanagedDescriptors.length; i++) {
+            long s = unmanagedDescriptors[i].getTotalSize();
+            componentElementSizes[i] = s;
+            totalPerEntity += s;
+        }
+        this.entitiesPerChunk = (totalPerEntity <= 0) ? DEFAULT_ENTITIES_PER_CHUNK : Math.max(1, (int) (CHUNK_SIZE / totalPerEntity));
+
+        this.chunks = new ArchetypeChunk[Math.max(4, 1)];
+        ArchetypeChunk first = new ArchetypeChunk(unmanagedDescriptors, componentElementSizes, entitiesPerChunk, arena, this.managedTypeIds.length);
+        this.chunks[0] = first;
+        chunkCount.set(1);
+        if (first.tryMarkQueued()) {
+            this.availableChunks.add(0);
+            this.availableCount.incrementAndGet();
+        }
+    }
+
+    // Internal helper to set unmanaged type ids after construction (used by ArchetypeManager)
+    void setUnmanagedTypeIds(int[] unmanagedTypeIds) {
+        if (unmanagedTypeIds == null || unmanagedTypeIds.length != this.descriptors.length) {
+            throw new IllegalArgumentException("unmanagedTypeIds length mismatch");
+        }
+        System.arraycopy(unmanagedTypeIds, 0, this.componentIds, 0, unmanagedTypeIds.length);
+    }
+
     /**
      * Get component mask (cached)
      */
@@ -95,7 +139,7 @@ public final class Archetype implements IArchetype {
 
     @Override
     public int[] getComponentTypeIds() {
-        return getComponentIds();
+        return allComponentTypeIds != null ? allComponentTypeIds : getComponentIds();
     }
 
     public ComponentDescriptor[] getDescriptors() { return descriptors; }
@@ -110,9 +154,7 @@ public final class Archetype implements IArchetype {
         ArchetypeChunk[] snap = this.chunks;
         int count = this.chunkCount.get();
         List<IArchetypeChunk> list = new ArrayList<>(count);
-        for (int i = 0; i < count; i++) {
-            list.add(snap[i]);
-        }
+        for (int i = 0; i < count; i++) list.add(snap[i]);
         return list;
     }
 
@@ -192,7 +234,7 @@ public final class Archetype implements IArchetype {
 
     // Create one chunk, append into array, allocate a slot in it, and enqueue if it still has free capacity
     private ArchetypeChunk.ChunkLocation createChunkAndAllocate(int entityId) {
-        ArchetypeChunk newChunk = new ArchetypeChunk(descriptors, componentElementSizes, entitiesPerChunk, arena);
+        ArchetypeChunk newChunk = new ArchetypeChunk(descriptors, componentElementSizes, entitiesPerChunk, arena, managedTypeIds.length);
         int newIndex = appendChunk(newChunk);
         int slot = newChunk.allocateSlot(entityId);
         if (newChunk.hasFree() && newChunk.tryMarkQueued()) {
@@ -231,7 +273,7 @@ public final class Archetype implements IArchetype {
     private void maybeProvision() {
         if (availableCount.get() < PROVISION_THRESHOLD && provisioning.compareAndSet(false, true)) {
             try {
-                ArchetypeChunk extra = new ArchetypeChunk(descriptors, componentElementSizes, entitiesPerChunk, arena);
+                ArchetypeChunk extra = new ArchetypeChunk(descriptors, componentElementSizes, entitiesPerChunk, arena, managedTypeIds.length);
                 int id = appendChunk(extra);
                 if (extra.tryMarkQueued()) {
                     availableChunks.offer(id);
@@ -326,7 +368,18 @@ public final class Archetype implements IArchetype {
                     return i;
                 }
             }
-            return -1; // not present in this archetype
+            return -1; // not present in this archetype or is managed-only
         });
     }
+
+    // Managed helpers
+    public int getManagedTypeIndex(int componentTypeId) {
+        if (managedTypeIds.length == 0) return -1;
+        return managedIndexMap.computeIfAbsent(componentTypeId, tid -> {
+            for (int i = 0; i < managedTypeIds.length; i++) if (managedTypeIds[i] == tid) return i;
+            return -1;
+        });
+    }
+
+    public int[] getManagedTypeIds() { return managedTypeIds; }
 }

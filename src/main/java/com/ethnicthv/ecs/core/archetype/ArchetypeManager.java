@@ -4,6 +4,8 @@ import com.ethnicthv.ecs.core.components.ComponentDescriptor;
 import com.ethnicthv.ecs.core.components.ComponentManager;
 
 import java.lang.foreign.Arena;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.IntFunction;
 
@@ -32,16 +34,35 @@ public final class ArchetypeManager {
      */
     public Archetype getOrCreateArchetype(ComponentMask mask) {
         return archetypes.computeIfAbsent(mask, m -> {
-            int[] componentIds = m.toComponentIdArray();
-            ComponentDescriptor[] descriptors = new ComponentDescriptor[componentIds.length];
-            for (int i = 0; i < componentIds.length; i++) {
-                var meta = metadataProvider.apply(componentIds[i]);
+            int[] allTypeIds = m.toComponentIdArray();
+            // Split into unmanaged and managed
+            List<ComponentDescriptor> unmanagedDescs = new ArrayList<>();
+            List<Integer> unmanagedIds = new ArrayList<>();
+            List<Integer> managedIds = new ArrayList<>();
+            for (int typeId : allTypeIds) {
+                var meta = metadataProvider.apply(typeId);
                 if (meta == null) {
-                    throw new IllegalStateException("Component metadata missing for id=" + componentIds[i]);
+                    throw new IllegalStateException("Component metadata missing for id=" + typeId);
                 }
-                descriptors[i] = componentManager.getDescriptor(meta.type());
+                ComponentDescriptor desc = componentManager.getDescriptor(meta.type());
+                if (desc == null) {
+                    throw new IllegalStateException("Descriptor missing for component " + meta.type().getName());
+                }
+                if (desc.isManaged()) {
+                    managedIds.add(typeId);
+                } else {
+                    unmanagedIds.add(typeId);
+                    unmanagedDescs.add(desc);
+                }
             }
-            return new Archetype(m, componentIds, descriptors, arena);
+            ComponentDescriptor[] unmanagedArray = unmanagedDescs.toArray(new ComponentDescriptor[0]);
+            int[] unmanagedIdsArray = unmanagedIds.stream().mapToInt(Integer::intValue).toArray();
+            int[] managedIdsArray = managedIds.stream().mapToInt(Integer::intValue).toArray();
+
+            Archetype archetype = new Archetype(m, allTypeIds, unmanagedArray, managedIdsArray, arena);
+            // Provide the mapping for unmanaged type ids order used in this archetype
+            archetype.setUnmanagedTypeIds(unmanagedIdsArray);
+            return archetype;
         });
     }
 

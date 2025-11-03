@@ -1,10 +1,14 @@
 package com.ethnicthv.ecs.core.system;
 
-import com.ethnicthv.ecs.core.api.archetype.IArchetypeQuery;
-import com.ethnicthv.ecs.core.archetype.ArchetypeQuery;
+import com.ethnicthv.ecs.core.api.archetype.IQuery;
+import com.ethnicthv.ecs.core.api.archetype.IQueryBuilder;
 import com.ethnicthv.ecs.core.archetype.ArchetypeWorld;
+import com.ethnicthv.ecs.core.system.annotation.Query;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -14,30 +18,17 @@ import java.util.List;
  * The SystemManager is responsible for:
  * <ul>
  *   <li>Registering systems</li>
- *   <li>Injecting {@link ArchetypeQuery} instances into {@link Query} annotated fields</li>
+ *   <li>Injecting immutable {@link IQuery} instances into {@link Query} annotated fields</li>
  *   <li>Automatically configuring parallel execution based on {@link ExecutionMode}</li>
  * </ul>
  * <p>
- * Example usage:
- * <pre>{@code
- * ArchetypeWorld world = new ArchetypeWorld(componentManager);
- * SystemManager systemManager = new SystemManager(world);
- *
- * MovementSystem movementSystem = new MovementSystem();
- * systemManager.registerSystem(movementSystem);
- *
- * // Now movementSystem's @Query fields are injected and ready to use
- * }</pre>
+ * Injected queries are immutable and thread-safe. They cannot be modified after injection,
+ * ensuring that the query configuration defined in annotations remains consistent.
  */
 public class SystemManager {
     private final ArchetypeWorld world;
     private final List<Object> registeredSystems;
 
-    /**
-     * Create a new SystemManager for the given world.
-     *
-     * @param world the ECS world that systems will query
-     */
     public SystemManager(ArchetypeWorld world) {
         this.world = world;
         this.registeredSystems = new ArrayList<>();
@@ -49,47 +40,46 @@ public class SystemManager {
      * This method will:
      * <ol>
      *   <li>Scan all fields annotated with {@link Query}</li>
-     *   <li>Create {@link ArchetypeQuery} instances based on annotation parameters</li>
+     *   <li>Build immutable {@link IQuery} instances based on annotation parameters</li>
      *   <li>Wrap queries in parallel-executing proxies if mode is PARALLEL</li>
-     *   <li>Inject the queries into the system's fields</li>
+     *   <li>Inject the immutable queries into the system's fields</li>
      * </ol>
-     *
-     * @param system the system instance to register
-     * @param <T> the type of the system
-     * @return the registered system (for chaining)
-     * @throws IllegalArgumentException if injection fails
+     * <p>
+     * The injected queries are immutable - calling builder methods like {@code with()}
+     * or {@code without()} on them will have no effect and may throw exceptions.
      */
     public <T> T registerSystem(T system) {
         if (system == null) {
             throw new IllegalArgumentException("System cannot be null");
         }
-
+        // Prefer generated injector if present
+        tryInvokeGeneratedInjector(system);
+        // Fallback to legacy reflection-based injection (field-level) if applicable
         injectDependencies(system);
         registeredSystems.add(system);
         return system;
     }
 
-    /**
-     * Get all registered systems.
-     *
-     * @return list of registered systems
-     */
+    private void tryInvokeGeneratedInjector(Object system) {
+        Class<?> cls = system.getClass();
+        String injectorName = cls.getName() + "__QueryInjector";
+        try {
+            Class<?> inj = Class.forName(injectorName, false, cls.getClassLoader());
+            java.lang.reflect.Method m = inj.getMethod("inject", Object.class, com.ethnicthv.ecs.core.archetype.ArchetypeWorld.class);
+            m.invoke(null, system, world);
+        } catch (ClassNotFoundException e) {
+            // No generated injector; ignore
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Failed to invoke generated injector " + injectorName, e);
+        }
+    }
+
     public List<Object> getRegisteredSystems() {
         return new ArrayList<>(registeredSystems);
     }
 
-    /**
-     * Inject dependencies into a system using reflection.
-     * <p>
-     * This method scans for fields annotated with {@link Query} and injects
-     * appropriately configured {@link ArchetypeQuery} instances.
-     *
-     * @param system the system to inject dependencies into
-     */
     private void injectDependencies(Object system) {
         Class<?> systemClass = system.getClass();
-
-        // Scan all declared fields
         for (Field field : systemClass.getDeclaredFields()) {
             if (field.isAnnotationPresent(Query.class)) {
                 injectQueryField(system, field);
@@ -97,36 +87,25 @@ public class SystemManager {
         }
     }
 
-    /**
-     * Inject a single query field.
-     *
-     * @param system the system instance
-     * @param field the field to inject
-     */
     private void injectQueryField(Object system, Field field) {
         Query queryAnnotation = field.getAnnotation(Query.class);
 
-        // Validate field type
-        if (!IArchetypeQuery.class.isAssignableFrom(field.getType())) {
+        // Field must be IQuery (immutable)
+        if (!IQuery.class.isAssignableFrom(field.getType())) {
             throw new IllegalArgumentException(
                 "Field " + field.getName() + " in " + system.getClass().getName() +
-                " annotated with @Query must be of type ArchetypeQuery"
+                " annotated with @Query must be of type IQuery (immutable)"
             );
         }
 
         try {
-            // Build base query from annotation parameters
-            IArchetypeQuery baseQuery = buildQuery(queryAnnotation);
+            IQuery immutableQuery = buildQuery(queryAnnotation);
+            IQuery injectedQuery = queryAnnotation.mode() == ExecutionMode.PARALLEL
+                ? createParallelProxy(immutableQuery)
+                : immutableQuery;
 
-            // Create proxy if parallel mode is requested
-            IArchetypeQuery injectedQuery = queryAnnotation.mode() == ExecutionMode.PARALLEL
-                ? createParallelProxy(baseQuery)
-                : baseQuery;
-
-            // Inject into field
             field.setAccessible(true);
             field.set(system, injectedQuery);
-
         } catch (IllegalAccessException e) {
             throw new IllegalArgumentException(
                 "Failed to inject query into field " + field.getName() +
@@ -135,88 +114,30 @@ public class SystemManager {
         }
     }
 
-    /**
-     * Build an ArchetypeQuery from annotation parameters.
-     *
-     * @param annotation the @Query annotation
-     * @return configured ArchetypeQuery
-     */
-    private IArchetypeQuery buildQuery(Query annotation) {
-        ArchetypeQuery query = world.query();
-
-        // Add WITH components
-        for (Class<?> componentClass : annotation.with()) {
-            query.with(componentClass);
-        }
-
-        // Add WITHOUT components
-        for (Class<?> componentClass : annotation.without()) {
-            query.without(componentClass);
-        }
-
-        // Add ANY components
-        if (annotation.any().length > 0) {
-            query.any(annotation.any());
-        }
-
-        return query;
+    private IQuery buildQuery(Query annotation) {
+        IQueryBuilder builder = world.query();
+        for (Class<?> componentClass : annotation.with()) builder.with(componentClass);
+        for (Class<?> componentClass : annotation.without()) builder.without(componentClass);
+        if (annotation.any().length > 0) builder.any(annotation.any());
+        return builder.build();
     }
 
-    /**
-     * Create a parallel-executing proxy for an ArchetypeQuery.
-     * <p>
-     * This method creates an anonymous subclass that overrides {@code forEachEntity}
-     * to delegate to {@code forEachParallel}, providing transparent parallel execution.
-     *
-     * @param baseQuery the base query to wrap
-     * @return a proxy that executes in parallel
-     */
-    private IArchetypeQuery createParallelProxy(final IArchetypeQuery baseQuery) {
-        return new IArchetypeQuery() {
-            @Override
-            public void forEachEntity(EntityConsumer consumer) {
-                // Redirect to parallel execution
-                baseQuery.forEachParallel(consumer);
-            }
+    private IQuery createParallelProxy(final IQuery baseQuery) {
+        return (IQuery) Proxy.newProxyInstance(
+            IQuery.class.getClassLoader(),
+            new Class<?>[]{ IQuery.class },
+            new ParallelQueryInvocationHandler(baseQuery)
+        );
+    }
 
-            // Delegate all other methods to base query
-            public <T> IArchetypeQuery with(Class<T> componentClass) {
-                baseQuery.with(componentClass);
-                return this;
+    private record ParallelQueryInvocationHandler(IQuery baseQuery) implements InvocationHandler {
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+            // Compare Method objects directly for speed and safety
+            if (method.equals(QueryMethods.FOR_EACH_ENTITY)) {
+                return QueryMethods.FOR_EACH_PARALLEL.invoke(baseQuery, args);
             }
-
-            @Override
-            public <T> IArchetypeQuery without(Class<T> componentClass) {
-                baseQuery.without(componentClass);
-                return this;
-            }
-
-            @Override
-            public IArchetypeQuery any(Class<?>... componentClasses) {
-                baseQuery.any(componentClasses);
-                return this;
-            }
-
-            @Override
-            public void forEach(ArchetypeConsumer consumer) {
-                baseQuery.forEach(consumer);
-            }
-
-            @Override
-            public void forEachChunk(ChunkConsumer consumer) {
-                baseQuery.forEachChunk(consumer);
-            }
-
-            @Override
-            public int count() {
-                return baseQuery.count();
-            }
-
-            @Override
-            public void forEachParallel(EntityConsumer consumer) {
-                baseQuery.forEachParallel(consumer);
-            }
-        };
+            return method.invoke(baseQuery, args);
+        }
     }
 }
-

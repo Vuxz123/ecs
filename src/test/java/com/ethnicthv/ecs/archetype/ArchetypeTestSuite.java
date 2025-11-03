@@ -1,6 +1,5 @@
 package com.ethnicthv.ecs.archetype;
 
-import com.ethnicthv.ecs.system.SystemManagerTest;
 import org.junit.platform.suite.api.SelectClasses;
 import org.junit.platform.suite.api.Suite;
 import org.junit.platform.suite.api.SuiteDisplayName;
@@ -17,7 +16,8 @@ import org.junit.platform.suite.api.SuiteDisplayName;
         ArchetypeTest.class,
         LockFreeAllocatorTest.class,
         ParallelQueryTest.class,
-        SystemManagerTest.class
+        ManagedComponentStoreTest.class,
+        ManagedIntegrationTest.class
 })
 public class ArchetypeTestSuite {
     // This class is used as a test suite runner

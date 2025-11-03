@@ -14,6 +14,8 @@ public class ComponentDescriptor {
     private final FieldDescriptor[] fieldArray;        // fast array for index-based access
     private final Map<String, Integer> fieldIndexMap;  // name -> index (immutable)
     private final Component.LayoutType layoutType;
+    // New: whether this component is managed (@Component.Managed) or unmanaged (default/@Unmanaged)
+    private final boolean managed;
 
     public ComponentDescriptor(Class<?> componentClass, long totalSize,
                               List<FieldDescriptor> fields, Component.LayoutType layoutType) {
@@ -33,6 +35,8 @@ public class ComponentDescriptor {
         this.fieldIndexMap = Collections.unmodifiableMap(indexMap);
 
         this.layoutType = layoutType;
+        // Determine managed kind from annotation on the component type
+        this.managed = componentClass.isAnnotationPresent(Component.Managed.class);
     }
 
     public Class<?> getComponentClass() {
@@ -69,6 +73,9 @@ public class ComponentDescriptor {
     public Component.LayoutType getLayoutType() {
         return layoutType;
     }
+
+    // New: managed flag
+    public boolean isManaged() { return managed; }
 
     /**
      * Field descriptor with type and layout information
@@ -130,6 +137,7 @@ public class ComponentDescriptor {
           .append(componentClass.getSimpleName())
           .append(", size=").append(totalSize)
           .append(", layout=").append(layoutType)
+          .append(", managed=").append(managed)
           .append(", fields=[\n");
         for (FieldDescriptor field : fieldList) {
             sb.append("  ").append(field.name())

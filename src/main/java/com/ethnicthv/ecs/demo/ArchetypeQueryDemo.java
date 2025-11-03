@@ -74,6 +74,7 @@ public class ArchetypeQueryDemo {
             world.query()
                     .with(PositionComponent.class)
                     .with(VelocityComponent.class)
+                    .build()
                     .forEachEntity((entityId, handles, archetype) -> {
                         // handles[0] -> Position, handles[1] -> Velocity
                         ComponentHandle ph = handles[0];
