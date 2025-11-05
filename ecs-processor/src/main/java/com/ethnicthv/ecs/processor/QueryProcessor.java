@@ -171,6 +171,23 @@ public class QueryProcessor extends AbstractProcessor {
             w.write("    } catch (Throwable t) { throw new RuntimeException(t); }\n");
             w.write("  }\n");
 
+            // Helper: ensure param kinds and filters are consistent
+            w.write("  private void validateConfig(int[] paramIds, int[] withIds, int[] anyIds){\n");
+            w.write("    final var cmgr = world.getComponentManager();\n");
+            w.write("    java.util.HashSet<Integer> covered = new java.util.HashSet<>();\n");
+            w.write("    for (int v : withIds) covered.add(v);\n");
+            w.write("    for (int v : anyIds) covered.add(v);\n");
+            w.write("    for (int i = 0; i < paramIds.length; i++) {\n");
+            w.write("      Class<?> cls = PARAM_CLASSES[i];\n");
+            w.write("      var desc = cmgr.getDescriptor(cls);\n");
+            w.write("      if (desc == null) throw new IllegalStateException(\"Descriptor not found for component: \" + cls.getName());\n");
+            w.write("      boolean isHandle = IS_HANDLE[i];\n");
+            w.write("      if (isHandle && desc.isManaged()) { throw new IllegalStateException(\"Parameter for \" + cls.getName() + \" is declared as ComponentHandle (unmanaged), but component is @Managed\"); }\n");
+            w.write("      if (!isHandle && !desc.isManaged()) { throw new IllegalStateException(\"Parameter for \" + cls.getName() + \" is declared as managed object, but descriptor is unmanaged. Use ComponentHandle instead.\"); }\n");
+            w.write("      if (!covered.contains(paramIds[i])) { throw new IllegalStateException(\"Query filters (with/any) must include parameter component: \" + cls.getName()); }\n");
+            w.write("    }\n");
+            w.write("  }\n");
+
             // runQuery implementation - dispatch to sequential or parallel
             w.write("  @Override public void runQuery(){\n");
             w.write("    if (MODE_PARALLEL) runParallel(); else runSequential();\n");
@@ -207,6 +224,8 @@ public class QueryProcessor extends AbstractProcessor {
                 if (i < anyClasses.size()-1) w.write(",");
             }
             w.write("};\n");
+            // Insert validation call
+            w.write("    validateConfig(paramIds, withIds, anyIds);\n");
 
             // Iterate archetypes
             w.write("    for (com.ethnicthv.ecs.core.archetype.Archetype archetype : world.getAllArchetypes()) {\n");
@@ -229,19 +248,20 @@ public class QueryProcessor extends AbstractProcessor {
             w.write("      }\n");
             w.write("      if (!ok) continue;\n");
 
-            // Iterate chunks and entities
+            // Allocate reusable arrays
+            w.write("      Object[] argsBuf = new Object[paramCount + 1]; argsBuf[0] = system;\n");
+            w.write("      com.ethnicthv.ecs.core.components.ComponentManager.BoundHandle[] bound = new com.ethnicthv.ecs.core.components.ComponentManager.BoundHandle[paramCount];\n");
+            // Iterate chunks
             w.write("      for (com.ethnicthv.ecs.core.api.archetype.IArchetypeChunk ich : archetype.getChunks()) {\n");
             w.write("        com.ethnicthv.ecs.core.archetype.ArchetypeChunk ch = (com.ethnicthv.ecs.core.archetype.ArchetypeChunk) ich;\n");
             w.write("        final int cap = ch.getCapacity();\n");
             w.write("        for (int ei = 0; ei < cap; ei++) { int eid = ch.getEntityId(ei); if (eid == -1) continue;\n");
-            w.write("          com.ethnicthv.ecs.core.components.ComponentManager.BoundHandle[] bound = new com.ethnicthv.ecs.core.components.ComponentManager.BoundHandle[paramCount];\n");
             w.write("          try {\n");
-            w.write("            Object[] args = new Object[paramCount + 1]; args[0] = system;\n");
             w.write("            for (int k = 0; k < paramCount; k++) {\n");
-            w.write("              if (IS_HANDLE[k]) { var seg = ch.getComponentData(compIdx[k], ei); bound[k] = cm.acquireBoundHandle(PARAM_CLASSES[k], seg); args[k+1] = bound[k].handle(); }\n");
-            w.write("              else { Object inst = world.getManagedComponent(eid, PARAM_CLASSES[k]); args[k+1] = inst; }\n");
+            w.write("              if (IS_HANDLE[k]) { var seg = ch.getComponentData(compIdx[k], ei); bound[k] = cm.acquireBoundHandle(PARAM_CLASSES[k], seg); argsBuf[k+1] = bound[k].handle(); }\n");
+            w.write("              else { Object inst = world.getManagedComponent(eid, PARAM_CLASSES[k]); if (inst == null) throw new IllegalStateException(\"Managed component instance missing for entity \" + eid + \" and type \" + PARAM_CLASSES[k].getName()); argsBuf[k+1] = inst; }\n");
             w.write("            }\n");
-            w.write("            mh.invokeWithArguments(java.util.Arrays.asList(args));\n");
+            w.write("            mh.invokeWithArguments(java.util.Arrays.asList(argsBuf));\n");
             w.write("          } catch (Throwable t) { throw new RuntimeException(t); }\n");
             w.write("          finally { for (int k = 0; k < paramCount; k++) { if (bound[k] != null) try { bound[k].close(); } catch (Exception ignore) {} } }\n");
             w.write("        }\n");
@@ -250,6 +270,8 @@ public class QueryProcessor extends AbstractProcessor {
             w.write("  }\n");
 
             // Parallel execution
+            w.write("  private static final ThreadLocal<Object[]> TL_ARGS = ThreadLocal.withInitial(() -> new Object[0]);\n");
+            w.write("  private static final ThreadLocal<com.ethnicthv.ecs.core.components.ComponentManager.BoundHandle[]> TL_BOUND = ThreadLocal.withInitial(() -> new com.ethnicthv.ecs.core.components.ComponentManager.BoundHandle[0]);\n");
             w.write("  private void runParallel(){\n");
             w.write("    record WorkItem(com.ethnicthv.ecs.core.archetype.Archetype archetype, com.ethnicthv.ecs.core.archetype.ArchetypeChunk chunk, int entityId, int elementIndex, int[] compIdx, int[] managedIdx) {}\n");
             w.write("    final java.util.List<WorkItem> tasks = new java.util.ArrayList<>();\n");
@@ -273,7 +295,8 @@ public class QueryProcessor extends AbstractProcessor {
                 if (i < anyClasses.size()-1) w.write(",");
             }
             w.write("};\n");
-
+            // before executing, validate once
+            w.write("    validateConfig(paramIds, withIds, anyIds);\n");
             // Build tasks per archetype and chunk
             w.write("    for (com.ethnicthv.ecs.core.archetype.Archetype archetype : world.getAllArchetypes()) {\n");
             w.write("      boolean ok = true;\n");
@@ -296,16 +319,16 @@ public class QueryProcessor extends AbstractProcessor {
             w.write("    final var cm = world.getComponentManager();\n");
             w.write("    tasks.parallelStream().forEach(item -> {\n");
             w.write("      final int paramCount = PARAM_CLASSES.length;\n");
-            w.write("      com.ethnicthv.ecs.core.components.ComponentManager.BoundHandle[] bound = new com.ethnicthv.ecs.core.components.ComponentManager.BoundHandle[paramCount];\n");
+            w.write("      com.ethnicthv.ecs.core.components.ComponentManager.BoundHandle[] bound = TL_BOUND.get();\n            if (bound.length != paramCount) { bound = new com.ethnicthv.ecs.core.components.ComponentManager.BoundHandle[paramCount]; TL_BOUND.set(bound); }\n");
+            w.write("      Object[] args = TL_ARGS.get(); if (args.length != paramCount + 1) { args = new Object[paramCount + 1]; args[0] = system; TL_ARGS.set(args); } else { args[0] = system; }\n");
             w.write("      try {\n");
-            w.write("        Object[] args = new Object[paramCount + 1]; args[0] = system;\n");
             w.write("        for (int k = 0; k < paramCount; k++) {\n");
             w.write("          if (IS_HANDLE[k]) { var seg = item.chunk().getComponentData(item.compIdx()[k], item.elementIndex()); bound[k] = cm.acquireBoundHandle(PARAM_CLASSES[k], seg); args[k+1] = bound[k].handle(); }\n");
-            w.write("          else { Object inst = world.getManagedComponent(item.entityId(), PARAM_CLASSES[k]); args[k+1] = inst; }\n");
+            w.write("          else { Object inst = world.getManagedComponent(item.entityId(), PARAM_CLASSES[k]); if (inst == null) throw new IllegalStateException(\"Managed component instance missing for entity \" + item.entityId() + \" and type \" + PARAM_CLASSES[k].getName()); args[k+1] = inst; }\n");
             w.write("        }\n");
             w.write("        mh.invokeWithArguments(java.util.Arrays.asList(args));\n");
             w.write("      } catch (Throwable t) { throw new RuntimeException(t); }\n");
-            w.write("      finally { for (int k = 0; k < bound.length; k++) { if (bound[k] != null) try { bound[k].close(); } catch (Exception ignore) {} } }\n");
+            w.write("      finally { for (int k = 0; k < bound.length; k++) { if (bound[k] != null) try { bound[k].close(); } catch (Exception ignore) {} bound[k] = null; } }\n");
             w.write("    });\n");
             w.write("  }\n");
 

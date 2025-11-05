@@ -23,6 +23,7 @@ dependencies {
     annotationProcessor(project(":ecs-processor"))
     // Enable it for tests as well
     testAnnotationProcessor(project(":ecs-processor"))
+    jmhAnnotationProcessor(project(":ecs-processor"))
 
     testImplementation(platform("org.junit:junit-bom:5.10.0"))
     testImplementation("org.junit.jupiter:junit-jupiter")

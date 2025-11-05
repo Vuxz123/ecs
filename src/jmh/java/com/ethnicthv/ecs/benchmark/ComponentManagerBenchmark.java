@@ -7,6 +7,10 @@ import com.ethnicthv.ecs.demo.HealthComponent;
 import com.ethnicthv.ecs.demo.PositionComponent;
 import com.ethnicthv.ecs.demo.TransformComponent;
 import com.ethnicthv.ecs.demo.VelocityComponent;
+import com.ethnicthv.ecs.core.api.archetype.IQuery;
+import com.ethnicthv.ecs.core.system.SystemManager;
+import com.ethnicthv.ecs.core.system.ExecutionMode;
+import com.ethnicthv.ecs.core.system.annotation.Query;
 import org.openjdk.jmh.annotations.*;
 import org.openjdk.jmh.infra.Blackhole;
 
@@ -25,6 +29,106 @@ import java.util.concurrent.TimeUnit;
 @Measurement(iterations = 5, time = 1)
 public class ComponentManagerBenchmark {
 
+    // ===== Systems for new API benchmarks =====
+    static class ReadWriteSystem {
+        IQuery q;
+        Blackhole bh;
+        int POS_X, POS_Y, VEL_VX, VEL_VY;
+        int count;
+        void run(){ count = 0; q.runQuery(); }
+        @Query(fieldInject = "q", mode = ExecutionMode.SEQUENTIAL, with = { PositionComponent.class, VelocityComponent.class })
+        private void step(@com.ethnicthv.ecs.core.system.annotation.Component(type = PositionComponent.class) ComponentHandle pos,
+                          @com.ethnicthv.ecs.core.system.annotation.Component(type = VelocityComponent.class) ComponentHandle vel) {
+            float x = pos.getFloat(POS_X);
+            float y = pos.getFloat(POS_Y);
+            float vx = vel.getFloat(VEL_VX);
+            float vy = vel.getFloat(VEL_VY);
+            if (bh != null) bh.consume(x + y + vx + vy);
+            count++;
+        }
+    }
+
+    static class UpdateSystem {
+        IQuery q;
+        int POS_X, VEL_VX;
+        void run(){ q.runQuery(); }
+        @Query(fieldInject = "q", mode = ExecutionMode.SEQUENTIAL, with = { PositionComponent.class, VelocityComponent.class })
+        private void step(@com.ethnicthv.ecs.core.system.annotation.Component(type = PositionComponent.class) ComponentHandle pos,
+                          @com.ethnicthv.ecs.core.system.annotation.Component(type = VelocityComponent.class) ComponentHandle vel) {
+            float x = pos.getFloat(POS_X);
+            float vx = vel.getFloat(VEL_VX);
+            pos.setFloat(POS_X, x + vx);
+        }
+    }
+
+    static class MovementSequentialSystem {
+        IQuery q;
+        int POS_X, VEL_VX;
+        void run(){ q.runQuery(); }
+        @Query(fieldInject = "q", mode = ExecutionMode.SEQUENTIAL, with = { PositionComponent.class, VelocityComponent.class })
+        private void step(@com.ethnicthv.ecs.core.system.annotation.Component(type = PositionComponent.class) ComponentHandle pos,
+                          @com.ethnicthv.ecs.core.system.annotation.Component(type = VelocityComponent.class) ComponentHandle vel) {
+            float x = pos.getFloat(POS_X);
+            float vx = vel.getFloat(VEL_VX);
+            pos.setFloat(POS_X, x + vx * 0.016f);
+        }
+    }
+
+    static class MovementParallelSystem {
+        IQuery q;
+        int POS_X, VEL_VX;
+        void run(){ q.runQuery(); }
+        @Query(fieldInject = "q", mode = ExecutionMode.PARALLEL, with = { PositionComponent.class, VelocityComponent.class })
+        private void step(@com.ethnicthv.ecs.core.system.annotation.Component(type = PositionComponent.class) ComponentHandle pos,
+                          @com.ethnicthv.ecs.core.system.annotation.Component(type = VelocityComponent.class) ComponentHandle vel) {
+            float x = pos.getFloat(POS_X);
+            float vx = vel.getFloat(VEL_VX);
+            pos.setFloat(POS_X, x + vx * 0.016f);
+        }
+    }
+
+    static class RenderSystem {
+        IQuery q;
+        Blackhole bh;
+        int POS_X, POS_Y;
+        int count;
+        void run(){ count = 0; q.runQuery(); }
+        @Query(fieldInject = "q", mode = ExecutionMode.SEQUENTIAL, with = { PositionComponent.class })
+        private void step(@com.ethnicthv.ecs.core.system.annotation.Component(type = PositionComponent.class) ComponentHandle pos) {
+            float x = pos.getFloat(POS_X);
+            float y = pos.getFloat(POS_Y);
+            if (bh != null) bh.consume(x * x + y * y);
+            count++;
+        }
+    }
+
+    static class ThroughputPosReadSystem {
+        IQuery q;
+        int POS_X;
+        void run(){ q.runQuery(); }
+        @Query(fieldInject = "q", mode = ExecutionMode.SEQUENTIAL, with = { PositionComponent.class })
+        private void step(@com.ethnicthv.ecs.core.system.annotation.Component(type = PositionComponent.class) ComponentHandle pos) {
+            // Minimal work to emulate iteration hot-path
+            pos.getFloat(POS_X);
+        }
+    }
+
+    static class EntitiesPerSecondSystem {
+        IQuery q;
+        int POS_X, POS_Y, VEL_VX, VEL_VY;
+        void run(){ q.runQuery(); }
+        @Query(fieldInject = "q", mode = ExecutionMode.SEQUENTIAL, with = { PositionComponent.class, VelocityComponent.class })
+        private void step(@com.ethnicthv.ecs.core.system.annotation.Component(type = PositionComponent.class) ComponentHandle pos,
+                          @com.ethnicthv.ecs.core.system.annotation.Component(type = VelocityComponent.class) ComponentHandle vel) {
+            float x = pos.getFloat(POS_X);
+            float y = pos.getFloat(POS_Y);
+            float vx = vel.getFloat(VEL_VX);
+            float vy = vel.getFloat(VEL_VY);
+            pos.setFloat(POS_X, x + vx);
+            pos.setFloat(POS_Y, y + vy);
+        }
+    }
+
     @State(Scope.Thread)
     public static class BenchmarkState {
         @Param({"10", "100", "1000", "10000", "100000", "1000000"})
@@ -33,16 +137,17 @@ public class ComponentManagerBenchmark {
         public ComponentManager manager;
         public ArchetypeWorld world;
         public Arena arena;
+        public SystemManager systemManager;
 
         // For specific benchmarks
         public int[] entities;
         public int POS_X, POS_Y, VEL_VX, VEL_VY;
 
-
         @Setup(Level.Invocation)
         public void setupInvocation() {
             manager = new ComponentManager();
             world = new ArchetypeWorld(manager);
+            systemManager = new SystemManager(world);
             arena = Arena.ofConfined();
 
             // Register common components
@@ -108,12 +213,16 @@ public class ComponentManagerBenchmark {
         public ComponentManager manager;
         public ArchetypeWorld world;
         public Arena arena;
+        public SystemManager systemManager;
         public int POS_X, POS_Y, VEL_VX, VEL_VY;
+        public ReadWriteSystem rwSys;
+        public UpdateSystem updSys;
 
         @Setup(Level.Trial)
         public void setupTrial() {
             manager = new ComponentManager();
             world = new ArchetypeWorld(manager);
+            systemManager = new SystemManager(world);
             arena = Arena.ofConfined();
 
             world.registerComponent(PositionComponent.class);
@@ -144,6 +253,15 @@ public class ComponentManagerBenchmark {
                     world.addComponent(e, VelocityComponent.class, vel);
                 }
             }
+
+            // Systems
+            rwSys = new ReadWriteSystem();
+            rwSys.POS_X = POS_X; rwSys.POS_Y = POS_Y; rwSys.VEL_VX = VEL_VX; rwSys.VEL_VY = VEL_VY;
+            systemManager.registerSystem(rwSys);
+
+            updSys = new UpdateSystem();
+            updSys.POS_X = POS_X; updSys.VEL_VX = VEL_VX;
+            systemManager.registerSystem(updSys);
         }
 
         @TearDown(Level.Trial)
@@ -155,34 +273,15 @@ public class ComponentManagerBenchmark {
 
     @Benchmark
     public void queryIteration_ReadWrite(QueryState state, Blackhole bh) {
-        final int[] count = {0};
-        state.world.query()
-                .with(PositionComponent.class)
-                .with(VelocityComponent.class)
-                .forEachEntity((_, handles, _) -> {
-            float x = handles[0].getFloat(state.POS_X);
-            float y = handles[0].getFloat(state.POS_Y);
-            float vx = handles[1].getFloat(state.VEL_VX);
-            float vy = handles[1].getFloat(state.VEL_VY);
-            // Simple computation to prevent optimization
-            bh.consume(x + y + vx + vy);
-            count[0]++;
-        });
-        bh.consume(count[0]);
+        state.rwSys.bh = bh;
+        state.rwSys.run();
+        bh.consume(state.rwSys.count);
     }
 
     @Benchmark
     public void queryIteration_Update(QueryState state) {
-        state.world.query()
-                .with(PositionComponent.class)
-                .with(VelocityComponent.class)
-                .forEachEntity((_, handles, _) -> {
-            float x = handles[0].getFloat(state.POS_X);
-            float vx = handles[1].getFloat(state.VEL_VX);
-            handles[0].setFloat(state.POS_X, x + vx);
-        });
+        state.updSys.run();
     }
-
 
     @State(Scope.Thread)
     public static class HandleState {
@@ -230,6 +329,7 @@ public class ComponentManagerBenchmark {
         public ComponentManager manager;
         public ArchetypeWorld world;
         public Arena arena;
+        public SystemManager systemManager;
         public int[] entities;
         public int POS_X, POS_Y, VEL_VX, VEL_VY;
         public final int MIGRATION_COUNT = 10_000;
@@ -238,6 +338,7 @@ public class ComponentManagerBenchmark {
         public void setup() {
             manager = new ComponentManager();
             world = new ArchetypeWorld(manager);
+            systemManager = new SystemManager(world);
             arena = Arena.ofConfined();
             world.registerComponent(PositionComponent.class);
             world.registerComponent(VelocityComponent.class);
@@ -288,12 +389,17 @@ public class ComponentManagerBenchmark {
         public ComponentManager manager;
         public ArchetypeWorld world;
         public Arena arena;
+        public SystemManager systemManager;
         public int POS_X, POS_Y, VEL_VX, VEL_VY;
+        public MovementSequentialSystem moveSeq;
+        public MovementParallelSystem movePar;
+        public RenderSystem render;
 
         @Setup(Level.Trial)
         public void setup() {
             manager = new ComponentManager();
             world = new ArchetypeWorld(manager);
+            systemManager = new SystemManager(world);
             arena = Arena.ofConfined();
 
             world.registerComponent(PositionComponent.class);
@@ -334,6 +440,18 @@ public class ComponentManagerBenchmark {
                     world.addComponent(e, HealthComponent.class, health);
                 }
             }
+
+            moveSeq = new MovementSequentialSystem();
+            moveSeq.POS_X = POS_X; moveSeq.VEL_VX = VEL_VX;
+            systemManager.registerSystem(moveSeq);
+
+            movePar = new MovementParallelSystem();
+            movePar.POS_X = POS_X; movePar.VEL_VX = VEL_VX;
+            systemManager.registerSystem(movePar);
+
+            render = new RenderSystem();
+            render.POS_X = POS_X; render.POS_Y = POS_Y;
+            systemManager.registerSystem(render);
         }
 
         @TearDown(Level.Trial)
@@ -345,63 +463,22 @@ public class ComponentManagerBenchmark {
 
     @Benchmark
     public void largeScale_SequentialQuery(LargeScaleState state, Blackhole bh) {
-        final int[] count = {0};
-        state.world.query()
-                .with(PositionComponent.class)
-                .with(VelocityComponent.class)
-                .forEachEntity((_, handles, _) -> {
-                    float x = handles[0].getFloat(state.POS_X);
-                    float vx = handles[1].getFloat(state.VEL_VX);
-                    handles[0].setFloat(state.POS_X, x + vx * 0.016f);
-                    count[0]++;
-                });
-        bh.consume(count[0]);
+        state.moveSeq.run();
+        bh.consume(1); // keep BH engaged
     }
 
     @Benchmark
     public void largeScale_ParallelQuery(LargeScaleState state, Blackhole bh) {
-        final int[] count = {0};
-        state.world.query()
-                .with(PositionComponent.class)
-                .with(VelocityComponent.class)
-                .forEachParallel((_, handles, _) -> {
-                    float x = handles[0].getFloat(state.POS_X);
-                    float vx = handles[1].getFloat(state.VEL_VX);
-                    handles[0].setFloat(state.POS_X, x + vx * 0.016f);
-                    synchronized (count) {
-                        count[0]++;
-                    }
-                });
-        bh.consume(count[0]);
+        state.movePar.run();
+        bh.consume(1);
     }
 
     @Benchmark
     public void largeScale_MultipleQueries(LargeScaleState state, Blackhole bh) {
-        // Simulate multiple systems running different queries
-        final int[] total = {0};
-
-        // Query 1: Position + Velocity (movement system)
-        state.world.query()
-                .with(PositionComponent.class)
-                .with(VelocityComponent.class)
-                .forEachEntity((_, handles, _) -> {
-                    float x = handles[0].getFloat(state.POS_X);
-                    float vx = handles[1].getFloat(state.VEL_VX);
-                    handles[0].setFloat(state.POS_X, x + vx * 0.016f);
-                    total[0]++;
-                });
-
-        // Query 2: Position only (render system)
-        state.world.query()
-                .with(PositionComponent.class)
-                .forEachEntity((_, handles, _) -> {
-                    float x = handles[0].getFloat(state.POS_X);
-                    float y = handles[0].getFloat(state.POS_Y);
-                    bh.consume(x * x + y * y); // Distance calculation
-                    total[0]++;
-                });
-
-        bh.consume(total[0]);
+        state.moveSeq.run();
+        state.render.bh = bh;
+        state.render.run();
+        bh.consume(state.render.count);
     }
 
     @State(Scope.Thread)
@@ -463,12 +540,16 @@ public class ComponentManagerBenchmark {
         public ComponentManager manager;
         public ArchetypeWorld world;
         public Arena arena;
+        public SystemManager systemManager;
         public int POS_X, POS_Y, VEL_VX, VEL_VY;
+        public ThroughputPosReadSystem posRead;
+        public EntitiesPerSecondSystem eps;
 
         @Setup(Level.Trial)
         public void setup() {
             manager = new ComponentManager();
             world = new ArchetypeWorld(manager);
+            systemManager = new SystemManager(world);
             arena = Arena.ofConfined();
 
             world.registerComponent(PositionComponent.class);
@@ -497,6 +578,14 @@ public class ComponentManagerBenchmark {
                 }
                 world.addComponent(e, VelocityComponent.class, vel);
             }
+
+            posRead = new ThroughputPosReadSystem();
+            posRead.POS_X = POS_X;
+            systemManager.registerSystem(posRead);
+
+            eps = new EntitiesPerSecondSystem();
+            eps.POS_X = POS_X; eps.POS_Y = POS_Y; eps.VEL_VX = VEL_VX; eps.VEL_VY = VEL_VY;
+            systemManager.registerSystem(eps);
         }
 
         @TearDown(Level.Trial)
@@ -508,31 +597,14 @@ public class ComponentManagerBenchmark {
 
     @Benchmark
     public void throughput_MaximalIteration(ThroughputState state, Blackhole bh) {
-        // Measure raw iteration throughput
-        long sum = 0;
-        state.world.query()
-                .with(PositionComponent.class)
-                .with(VelocityComponent.class)
-                .forEachEntity((eid, handles, _) -> {
-                    bh.consume(eid);
-                });
+        state.posRead.run();
+        bh.consume(1);
     }
 
     @Benchmark
     @BenchmarkMode(Mode.Throughput)
     @OutputTimeUnit(TimeUnit.SECONDS)
     public void throughput_EntitiesPerSecond(ThroughputState state) {
-        // Measure entities processed per second
-        state.world.query()
-                .with(PositionComponent.class)
-                .with(VelocityComponent.class)
-                .forEachEntity((_, handles, _) -> {
-                    float x = handles[0].getFloat(state.POS_X);
-                    float y = handles[0].getFloat(state.POS_Y);
-                    float vx = handles[1].getFloat(state.VEL_VX);
-                    float vy = handles[1].getFloat(state.VEL_VY);
-                    handles[0].setFloat(state.POS_X, x + vx);
-                    handles[0].setFloat(state.POS_Y, y + vy);
-                });
+        state.eps.run();
     }
 }
