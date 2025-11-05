@@ -2,13 +2,13 @@ package com.ethnicthv.ecs.core.archetype;
 
 import com.ethnicthv.ecs.core.api.archetype.IQuery;
 import com.ethnicthv.ecs.core.api.archetype.IQueryBuilder;
-import com.ethnicthv.ecs.core.api.archetype.IArchetype;
 import com.ethnicthv.ecs.core.api.archetype.IArchetypeChunk;
 import com.ethnicthv.ecs.core.components.ComponentHandle;
 import com.ethnicthv.ecs.core.components.ComponentManager;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Arrays;
 
 /**
  * Query system for filtering archetypes based on component requirements.
@@ -228,58 +228,73 @@ public final class ArchetypeQuery implements IQueryBuilder, IQuery {
             throw new NullPointerException("EntityConsumer must not be null");
         }
 
-        record WorkItem(IArchetype archetype, ArchetypeChunk chunk, int entityId, int elementIndex) {}
-
-        List<WorkItem> tasks = new ArrayList<>();
-
-        // Build flat list of work items across all matching chunks
-        forEachChunk((ichunk, archetype) -> {
-            // Cast to concrete chunk to leverage fast occupied-iteration helpers
-            ArchetypeChunk chunk = (ArchetypeChunk) ichunk;
-            int idx = chunk.nextOccupiedIndex(0);
-            while (idx >= 0) {
-                int entityId = chunk.getEntityId(idx);
-                tasks.add(new WorkItem(archetype, chunk, entityId, idx));
-                idx = chunk.nextOccupiedIndex(idx + 1);
-            }
-        });
-
         ComponentManager mgr = world.getComponentManager();
+        // Freeze component classes once
         Class<?>[] componentClasses = new Class<?>[compList.size()];
         for (int i = 0; i < compList.size(); i++) {
             componentClasses[i] = compList.get(i);
         }
 
-        tasks.parallelStream().forEach(item -> {
-            ArchetypeChunk chunk = item.chunk();
-            int elementIndex = item.elementIndex();
+        ComponentMask with = withMask.build();
+        ComponentMask without = withoutMask.build();
 
-            int[] compIndices = new int[compIdxList.size()];
-            for (int i = 0; i < compIdxList.size(); i++) {
-                int idx = item.archetype().indexOfComponentType(compIdxList.get(i));
-                if (idx < 0) {
-                    return; // Component not found in this archetype
+        for (Archetype archetype : world.getAllArchetypes()) {
+            ComponentMask archetypeMask = archetype.getMask();
+            if (!archetypeMask.containsAll(with)) continue;
+            if (!archetypeMask.containsNone(without)) continue;
+            if (!anyMasks.isEmpty()) {
+                boolean matchesAny = false;
+                for (ComponentMask anyMask : anyMasks) {
+                    if (archetypeMask.intersects(anyMask)) { matchesAny = true; break; }
                 }
+                if (!matchesAny) continue;
+            }
+
+            // Precompute component indices for this archetype
+            int[] compIndices = new int[compIdxList.size()];
+            boolean ok = true;
+            for (int i = 0; i < compIdxList.size(); i++) {
+                int idx = archetype.indexOfComponentType(compIdxList.get(i));
+                if (idx < 0) { ok = false; break; }
                 compIndices[i] = idx;
             }
+            if (!ok) continue; // this archetype doesn't contain all components
 
-            ComponentManager.BoundHandle[] bound = new ComponentManager.BoundHandle[componentClasses.length];
-            ComponentHandle[] handles = new ComponentHandle[componentClasses.length];
-            try {
+            // Pre-fetch descriptors for fast handle.reset
+            com.ethnicthv.ecs.core.components.ComponentDescriptor[] paramDescs = new com.ethnicthv.ecs.core.components.ComponentDescriptor[componentClasses.length];
+            for (int i = 0; i < componentClasses.length; i++) {
+                paramDescs[i] = mgr.getDescriptor(componentClasses[i]);
+            }
+
+            // Stream chunks directly in parallel
+            ArchetypeChunk[] chunks = archetype.getChunksSnapshot();
+            int count = archetype.chunkCount();
+            Arrays.stream(chunks, 0, count).parallel().forEach(chunk -> {
+                // Acquire pooled handles once per chunk
+                ComponentHandle[] pooled = new ComponentHandle[compIndices.length];
                 for (int k = 0; k < compIndices.length; k++) {
-                    int compIdx = compIndices[k];
-                    var seg = chunk.getComponentData(compIdx, elementIndex);
-                    bound[k] = mgr.acquireBoundHandle(componentClasses[k], seg);
-                    handles[k] = bound[k].handle();
+                    pooled[k] = mgr.acquireHandle();
                 }
-                consumer.accept(item.entityId(), handles, item.archetype());
-            } finally {
-                for (ComponentManager.BoundHandle boundHandle : bound) {
-                    if (boundHandle != null) {
-                        try { boundHandle.close(); } catch (Exception ignored) {}
+                try {
+                    int idx = chunk.nextOccupiedIndex(0);
+                    while (idx >= 0) {
+                        int entityId = chunk.getEntityId(idx);
+                        // Rebind pooled handles to this entity's component segments
+                        for (int k = 0; k < compIndices.length; k++) {
+                            var seg = chunk.getComponentData(compIndices[k], idx);
+                            pooled[k].reset(seg, paramDescs[k]);
+                        }
+                        // Pass handles to consumer
+                        consumer.accept(entityId, pooled, archetype);
+                        idx = chunk.nextOccupiedIndex(idx + 1);
+                    }
+                } finally {
+                    // Release handles back to pool
+                    for (int k = 0; k < compIndices.length; k++) {
+                        if (pooled[k] != null) mgr.releaseHandle(pooled[k]);
                     }
                 }
-            }
-        });
+            });
+        }
     }
 }
