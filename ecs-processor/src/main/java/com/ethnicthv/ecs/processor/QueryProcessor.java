@@ -3,7 +3,6 @@ package com.ethnicthv.ecs.processor;
 import javax.annotation.processing.*;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.*;
-import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.Elements;
 import javax.tools.Diagnostic;
 import javax.tools.JavaFileObject;
@@ -186,9 +185,7 @@ public class QueryProcessor extends AbstractProcessor {
             // Managed/unmanaged decision based on descriptor, not declared type
             w.write("  private final boolean[] PARAM_IS_MANAGED;\n");
             w.write("  private final boolean[] PARAM_EXPECTS_RAW_HANDLE;\n");
-            w.write("  private final java.lang.reflect.Constructor<?>[] TYPED_CTORS;\n");
             w.write("  private final java.lang.invoke.MethodHandle[] BINDER_MH;\n");
-            // Add param descriptors for fast reset
             w.write("  private final com.ethnicthv.ecs.core.components.ComponentDescriptor[] PARAM_DESCRIPTORS;\n");
             // For codegen specialization: which params have direct binder
             w.write("  private static final boolean[] DIRECT_BIND = new boolean[]{");
@@ -203,6 +200,10 @@ public class QueryProcessor extends AbstractProcessor {
             // Strategy enum and array
             w.write("  private enum ParamStrategy { MANAGED, UNMANAGED_RAW, UNMANAGED_TYPED }\n");
             w.write("  private final ParamStrategy[] STRATEGY = new ParamStrategy[PARAM_COUNT];\n");
+            // Typed handle reuse pools
+            w.write("  private final java.lang.reflect.Constructor<?>[] TYPED_CTORS = new java.lang.reflect.Constructor<?>[PARAM_COUNT];\n");
+            w.write("  private final Object[] SEQ_TYPED = new Object[PARAM_COUNT];\n");
+            w.write("  private final ThreadLocal<Object[]> PAR_TYPED = ThreadLocal.withInitial(() -> { Object[] a = new Object[PARAM_COUNT]; try { for (int i = 0; i < PARAM_COUNT; i++) { if (STRATEGY[i] == ParamStrategy.UNMANAGED_TYPED) { a[i] = TYPED_CTORS[i].newInstance(); } } } catch (Throwable t) { throw new RuntimeException(t); } return a; });\n");
 
             // Constructor
             w.write("  public " + name + "(com.ethnicthv.ecs.core.archetype.ArchetypeWorld w, " + ownerQualified + " s){\n");
@@ -221,10 +222,9 @@ public class QueryProcessor extends AbstractProcessor {
             w.write("    com.ethnicthv.ecs.core.archetype.ComponentMask.Builder wb = com.ethnicthv.ecs.core.archetype.ComponentMask.builder(); for (int id : this.withIds) wb.with(id); for (int id : this.paramIds) wb.with(id); this.withMask = wb.build();\n");
             w.write("    com.ethnicthv.ecs.core.archetype.ComponentMask.Builder woutb = com.ethnicthv.ecs.core.archetype.ComponentMask.builder(); for (int id : this.withoutIds) woutb.with(id); this.withoutMask = woutb.build();\n");
             w.write("    com.ethnicthv.ecs.core.archetype.ComponentMask.Builder ab = com.ethnicthv.ecs.core.archetype.ComponentMask.builder(); for (int id : this.anyIds) ab.with(id); this.anyMask = ab.build();\n");
-            // Determine param managed kind and prepare typed binder metadata
+            // Determine param kinds and prepare binders
             w.write("    this.PARAM_IS_MANAGED = new boolean[PARAM_COUNT];\n");
             w.write("    this.PARAM_EXPECTS_RAW_HANDLE = new boolean[PARAM_COUNT];\n");
-            w.write("    this.TYPED_CTORS = new java.lang.reflect.Constructor<?>[PARAM_COUNT];\n");
             w.write("    this.BINDER_MH = new java.lang.invoke.MethodHandle[PARAM_COUNT];\n");
             w.write("    this.PARAM_DESCRIPTORS = new com.ethnicthv.ecs.core.components.ComponentDescriptor[PARAM_COUNT];\n");
             w.write("    final var __cmgr = world.getComponentManager();\n");
@@ -248,6 +248,8 @@ public class QueryProcessor extends AbstractProcessor {
             w.write("        } catch (Throwable t) { throw new IllegalStateException(\"Failed to prepare typed handle for parameter \" + i + \" of type \" + DECLARED_PARAM_TYPES[i].getName(), t); }\n");
             w.write("      }\n");
             w.write("    }\n");
+            // Initialize typed constructors and instances outside loops
+            w.write("    try { for (int i = 0; i < PARAM_COUNT; i++) { if (STRATEGY[i] == ParamStrategy.UNMANAGED_TYPED) { TYPED_CTORS[i] = DECLARED_PARAM_TYPES[i].getDeclaredConstructor(); TYPED_CTORS[i].setAccessible(true); SEQ_TYPED[i] = TYPED_CTORS[i].newInstance(); } } } catch (Throwable t) { throw new RuntimeException(t); }\n");
             w.write("    validateConfig();\n");
             w.write("  }\n");
 
@@ -258,7 +260,9 @@ public class QueryProcessor extends AbstractProcessor {
                 w.write("      var lookup = java.lang.invoke.MethodHandles.lookup();\n");
                 w.write("      var prv = java.lang.invoke.MethodHandles.privateLookupIn(" + ownerQualified + ".class, lookup);\n");
                 w.write("      var mt = java.lang.invoke.MethodType.methodType(void.class");
-                for (int i = 0; i < paramDeclaredTypes.size(); i++) { w.write(", " + paramDeclaredTypes.get(i) + ".class"); }
+                for (String paramDeclaredType : paramDeclaredTypes) {
+                    w.write(", " + paramDeclaredType + ".class");
+                }
                 w.write(");\n");
                 w.write("      return prv.findVirtual(" + ownerQualified + ".class, \"" + methodName + "\", mt);\n");
                 w.write("    } catch (Throwable t) { throw new RuntimeException(t); }\n");
@@ -298,38 +302,47 @@ public class QueryProcessor extends AbstractProcessor {
             // Acquire one handle per unmanaged param for entire archetype iteration
             w.write("      final com.ethnicthv.ecs.core.components.ComponentHandle[] pooled = new com.ethnicthv.ecs.core.components.ComponentHandle[PARAM_COUNT];\n");
             w.write("      for (int i = 0; i < PARAM_COUNT; i++) { if (!PARAM_IS_MANAGED[i]) pooled[i] = cm.acquireHandle(); }\n");
-            w.write("      final Object[] typedObjs = new Object[PARAM_COUNT]; for (int i = 0; i < PARAM_COUNT; i++) { if (!PARAM_IS_MANAGED[i] && !PARAM_EXPECTS_RAW_HANDLE[i] && TYPED_CTORS[i] != null) { try { typedObjs[i] = TYPED_CTORS[i].newInstance(); } catch (Throwable t) { throw new RuntimeException(t); } } }\n");
+            w.write("      final Object[] typed = SEQ_TYPED;\n");
             w.write("      try {\n");
             w.write("        archetype.forEach((entityId, location, chunk) -> {\n");
             w.write("          try {\n");
             // Rebind pooled handles per-entity
             w.write("            for (int k = 0; k < PARAM_COUNT; k++) { if (STRATEGY[k] != ParamStrategy.MANAGED) { var seg = chunk.getComponentData(plan.compIdx[k], location.indexInChunk); pooled[k].reset(seg, PARAM_DESCRIPTORS[k]); } }\n");
-            // Insert direct binds for typed unmanaged
-            w.write("            /*__SEQ_DIRECT_BINDS__*/\n");
-            // Prepare per-param locals to eliminate ternaries at call site
+            // Insert binder calls for typed unmanaged
+            StringBuilder bindsSeq = new StringBuilder();
+            for (int i = 0; i < paramDeclaredTypes.size(); i++) {
+                String decl = paramDeclaredTypes.get(i);
+                bindsSeq.append("            if (STRATEGY[").append(i).append("] == ParamStrategy.UNMANAGED_TYPED) { ");
+                if (directBinderNames.get(i) != null) {
+                    bindsSeq.append("((").append(decl).append(") typed[").append(i).append("]).").append(directBinderNames.get(i)).append("((com.ethnicthv.ecs.core.components.ComponentHandle) pooled[").append(i).append("]);\n");
+                } else {
+                    bindsSeq.append("try { BINDER_MH[").append(i).append("].invoke(typed[").append(i).append("], pooled[").append(i).append("]); } catch (Throwable __t) { throw new RuntimeException(__t); }\n");
+                }
+                bindsSeq.append("            }\n");
+            }
+            w.write(bindsSeq.toString());
+            // Prepare per-param locals
             StringBuilder prepArgsSeq = new StringBuilder();
             for (int i = 0; i < paramDeclaredTypes.size(); i++) {
                 String dt = paramDeclaredTypes.get(i);
                 prepArgsSeq.append("            final Object __argObj_").append(i).append(" = ");
                 prepArgsSeq.append("(STRATEGY[").append(i).append("] == ParamStrategy.MANAGED) ? world.getManagedComponent(entityId, PARAM_CLASSES[").append(i).append("]) : ");
-                prepArgsSeq.append("(STRATEGY[").append(i).append("] == ParamStrategy.UNMANAGED_RAW) ? pooled[").append(i).append("] : typedObjs[").append(i).append("];\n");
+                prepArgsSeq.append("(STRATEGY[").append(i).append("] == ParamStrategy.UNMANAGED_RAW) ? pooled[").append(i).append("] : typed[").append(i).append("];\n");
                 prepArgsSeq.append("            final ").append(dt).append(" a").append(i).append(" = (").append(dt).append(") __argObj_").append(i).append(";\n");
             }
             w.write(prepArgsSeq.toString());
             // Call
+            StringBuilder callSeq = new StringBuilder();
             if (isPrivate) {
-                StringBuilder callSeq = new StringBuilder();
                 callSeq.append("            try { invExact.invokeExact(system");
                 for (int i = 0; i < paramDeclaredTypes.size(); i++) callSeq.append(", a").append(i);
                 callSeq.append("); } catch (Throwable t) { throw new RuntimeException(t); }\n");
-                w.write(callSeq.toString());
             } else {
-                StringBuilder callSeq = new StringBuilder();
                 callSeq.append("            system.").append(methodName).append("(");
                 for (int i = 0; i < paramDeclaredTypes.size(); i++) { if (i>0) callSeq.append(", "); callSeq.append("a").append(i); }
                 callSeq.append(");\n");
-                w.write(callSeq.toString());
             }
+            w.write(callSeq.toString());
             w.write("          } catch (Throwable tt) { throw new RuntimeException(tt); }\n");
             w.write("        });\n");
             w.write("      } finally { for (int i = 0; i < PARAM_COUNT; i++) { if (pooled[i] != null) cm.releaseHandle(pooled[i]); } }\n");
@@ -338,52 +351,61 @@ public class QueryProcessor extends AbstractProcessor {
 
             // Parallel execution
             w.write("  private void runParallel(){\n");
-            w.write("    record WorkItem(com.ethnicthv.ecs.core.archetype.Archetype archetype, com.ethnicthv.ecs.core.archetype.ArchetypeChunk chunk, ArchetypePlan plan) {}\n");
-            w.write("    final java.util.List<WorkItem> tasks = new java.util.ArrayList<>();\n");
+            w.write("    final var cm = world.getComponentManager();\n");
             w.write("    for (com.ethnicthv.ecs.core.archetype.Archetype archetype : world.getAllArchetypes()) {\n");
             w.write("      com.ethnicthv.ecs.core.archetype.ComponentMask am = archetype.getMask(); if (!am.containsAll(withMask)) continue; if (!am.containsNone(withoutMask)) continue; if (anyIds.length > 0 && !am.intersects(anyMask)) continue;\n");
-            w.write("      ArchetypePlan plan = PLAN_CACHE.computeIfAbsent(archetype, this::buildPlan); if (plan == null) continue;\n");
-            w.write("      com.ethnicthv.ecs.core.archetype.ArchetypeChunk[] chunks = archetype.getChunksSnapshot(); int count = archetype.chunkCount(); for (int ci = 0; ci < count; ci++) { com.ethnicthv.ecs.core.archetype.ArchetypeChunk ch = chunks[ci]; tasks.add(new WorkItem(archetype, ch, plan)); }\n");
-            w.write("    }\n");
-            w.write("    final var cm = world.getComponentManager();\n");
-            w.write("    tasks.parallelStream().forEach(item -> {\n");
+            w.write("      final ArchetypePlan plan = PLAN_CACHE.computeIfAbsent(archetype, this::buildPlan); if (plan == null) continue;\n");
+            w.write("      final com.ethnicthv.ecs.core.archetype.ArchetypeChunk[] chunks = archetype.getChunksSnapshot(); final int count = archetype.chunkCount();\n");
+            w.write("      java.util.Arrays.stream(chunks, 0, count).parallel().forEach(chunk -> {\n");
             // Acquire handles per chunk
-            w.write("      final com.ethnicthv.ecs.core.components.ComponentHandle[] pooled = new com.ethnicthv.ecs.core.components.ComponentHandle[PARAM_COUNT]; for (int i = 0; i < PARAM_COUNT; i++) { if (!PARAM_IS_MANAGED[i]) pooled[i] = cm.acquireHandle(); }\n");
-            // Thread-local typed reuse or allocate per chunk
-            w.write("      final Object[] typed = new Object[PARAM_COUNT]; for (int i = 0; i < PARAM_COUNT; i++) { if (!PARAM_IS_MANAGED[i] && !PARAM_EXPECTS_RAW_HANDLE[i] && TYPED_CTORS[i] != null) { try { typed[i] = TYPED_CTORS[i].newInstance(); } catch (Throwable t) { throw new RuntimeException(t); } } }\n");
-            w.write("      try {\n");
-            w.write("        int idx = item.chunk().nextOccupiedIndex(0); while (idx >= 0) { int eid = item.chunk().getEntityId(idx);\n");
-            // Rebind handles per entity (no binder calls here)
-            w.write("          for (int k = 0; k < PARAM_COUNT; k++) { if (STRATEGY[k] != ParamStrategy.MANAGED) { var seg = item.chunk().getComponentData(item.plan().compIdx[k], idx); pooled[k].reset(seg, PARAM_DESCRIPTORS[k]); } }\n");
-            // Insert direct binds for typed unmanaged (already computed earlier as directBindPar)
-            w.write("          /*__PAR_DIRECT_BINDS__*/\n");
+            w.write("        final com.ethnicthv.ecs.core.components.ComponentHandle[] pooled = new com.ethnicthv.ecs.core.components.ComponentHandle[PARAM_COUNT]; for (int i = 0; i < PARAM_COUNT; i++) { if (!PARAM_IS_MANAGED[i]) pooled[i] = cm.acquireHandle(); }\n");
+            // Thread-local typed reuse
+            w.write("        final Object[] typed = PAR_TYPED.get();\n");
+            w.write("        try {\n");
+            w.write("          int idx = chunk.nextOccupiedIndex(0); while (idx >= 0) { int eid = chunk.getEntityId(idx);\n");
+            // Rebind handles per entity
+            w.write("            for (int k = 0; k < PARAM_COUNT; k++) { if (STRATEGY[k] != ParamStrategy.MANAGED) { var seg = chunk.getComponentData(plan.compIdx[k], idx); pooled[k].reset(seg, PARAM_DESCRIPTORS[k]); } }\n");
+            // Insert binder calls for typed unmanaged
+            StringBuilder bindsPar = new StringBuilder();
+            for (int i = 0; i < paramDeclaredTypes.size(); i++) {
+                String decl = paramDeclaredTypes.get(i);
+                bindsPar.append("            if (STRATEGY[").append(i).append("] == ParamStrategy.UNMANAGED_TYPED) { ");
+                if (directBinderNames.get(i) != null) {
+                    bindsPar.append("((").append(decl).append(") typed[").append(i).append("]).").append(directBinderNames.get(i)).append("((com.ethnicthv.ecs.core.components.ComponentHandle) pooled[").append(i).append("]);\n");
+                } else {
+                    bindsPar.append("try { BINDER_MH[").append(i).append("].invoke(typed[").append(i).append("], pooled[").append(i).append("]); } catch (Throwable __t) { throw new RuntimeException(__t); }\n");
+                }
+                bindsPar.append("            }\n");
+            }
+            w.write(bindsPar.toString());
             // Prepare per-param locals
             StringBuilder prepArgsPar = new StringBuilder();
             for (int i = 0; i < paramDeclaredTypes.size(); i++) {
                 String dt = paramDeclaredTypes.get(i);
-                prepArgsPar.append("          final Object __argObj_").append(i).append(" = ");
+                prepArgsPar.append("            final Object __argObj_").append(i).append(" = ");
                 prepArgsPar.append("(STRATEGY[").append(i).append("] == ParamStrategy.MANAGED) ? world.getManagedComponent(eid, PARAM_CLASSES[").append(i).append("]) : ");
                 prepArgsPar.append("(STRATEGY[").append(i).append("] == ParamStrategy.UNMANAGED_RAW) ? pooled[").append(i).append("] : typed[").append(i).append("];\n");
-                prepArgsPar.append("          final ").append(dt).append(" a").append(i).append(" = (").append(dt).append(") __argObj_").append(i).append(";\n");
+                prepArgsPar.append("            final ").append(dt).append(" a").append(i).append(" = (").append(dt).append(") __argObj_").append(i).append(";\n");
             }
             w.write(prepArgsPar.toString());
             // Call
             if (isPrivate) {
                 StringBuilder callPar = new StringBuilder();
-                callPar.append("          try { invExact.invokeExact(system");
+                callPar.append("            try { invExact.invokeExact(system");
                 for (int i = 0; i < paramDeclaredTypes.size(); i++) callPar.append(", a").append(i);
                 callPar.append("); } catch (Throwable t) { throw new RuntimeException(t); }\n");
                 w.write(callPar.toString());
             } else {
                 StringBuilder callPar = new StringBuilder();
-                callPar.append("          system.").append(methodName).append("(");
+                callPar.append("            system.").append(methodName).append("(");
                 for (int i = 0; i < paramDeclaredTypes.size(); i++) { if (i>0) callPar.append(", "); callPar.append("a").append(i); }
                 callPar.append(");\n");
                 w.write(callPar.toString());
             }
-            w.write("          idx = item.chunk().nextOccupiedIndex(idx + 1); }\n");
-            w.write("      } finally { for (int i = 0; i < PARAM_COUNT; i++) { if (pooled[i] != null) cm.releaseHandle(pooled[i]); } }\n");
-            w.write("    });\n");
+            w.write("            idx = chunk.nextOccupiedIndex(idx + 1); }\n");
+            w.write("        } finally { for (int i = 0; i < PARAM_COUNT; i++) { if (pooled[i] != null) cm.releaseHandle(pooled[i]); } }\n");
+            w.write("      });\n");
+            w.write("    }\n");
             w.write("  }\n");
 
             // Close class
@@ -401,7 +423,7 @@ public class QueryProcessor extends AbstractProcessor {
                 if (!m.getModifiers().contains(Modifier.PUBLIC)) continue;
                 List<? extends VariableElement> params = m.getParameters();
                 if (params.size() != 1) continue;
-                String p0 = params.get(0).asType().toString();
+                String p0 = params.getFirst().asType().toString();
                 if ("com.ethnicthv.ecs.core.components.ComponentHandle".equals(p0)) return n;
             }
         }
@@ -432,10 +454,9 @@ public class QueryProcessor extends AbstractProcessor {
             if (v instanceof List<?> list) {
                 for (Object o : list) {
                     Object ev = ((AnnotationValue) o).getValue();
-                    out.add(ev.toString()); // returns class literal string like com.Foo.class
-                    // We need the class name without ".class"
-                    if (out.get(out.size()-1).endsWith(".class")) {
-                        String s = out.get(out.size()-1);
+                    out.add(ev.toString());
+                    if (out.getLast().endsWith(".class")) {
+                        String s = out.getLast();
                         out.set(out.size()-1, s.substring(0, s.length()-6));
                     }
                 }
