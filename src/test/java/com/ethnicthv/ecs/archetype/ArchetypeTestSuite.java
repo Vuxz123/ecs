@@ -17,7 +17,8 @@ import org.junit.platform.suite.api.SuiteDisplayName;
         LockFreeAllocatorTest.class,
         ParallelQueryTest.class,
         ManagedComponentStoreTest.class,
-        ManagedIntegrationTest.class
+        ManagedIntegrationTest.class,
+        MixedManagedUnmanagedRunnerTest.class
 })
 public class ArchetypeTestSuite {
     // This class is used as a test suite runner

@@ -3,6 +3,7 @@ package com.ethnicthv.ecs.processor;
 import javax.annotation.processing.*;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.*;
+import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.Elements;
 import javax.tools.Diagnostic;
 import javax.tools.JavaFileObject;
@@ -95,6 +96,8 @@ public class QueryProcessor extends AbstractProcessor {
 
         // Collect parameter component classes from @Component(type=...)
         List<String> paramComponentClasses = new ArrayList<>();
+        List<String> paramDeclaredTypes = new ArrayList<>();
+        List<Boolean> paramIsHandle = new ArrayList<>();
         for (VariableElement p : method.getParameters()) {
             AnnotationMirror compAnno = getAnnotation(p, "com.ethnicthv.ecs.core.system.annotation.Component");
             if (compAnno == null) {
@@ -107,13 +110,20 @@ public class QueryProcessor extends AbstractProcessor {
                 continue;
             }
             paramComponentClasses.add(typeClass);
+            TypeMirror declared = p.asType();
+            String declaredType = declared.toString();
+            paramDeclaredTypes.add(declaredType);
+            // Treat ComponentHandle parameters as unmanaged/raw; anything else is a managed object accessor
+            paramIsHandle.add("com.ethnicthv.ecs.core.components.ComponentHandle".equals(declaredType));
         }
 
-        // Read query filters (with/without/any)
+        // Read query filters (with/without/any) and mode
         AnnotationMirror q = getAnnotation(method, "com.ethnicthv.ecs.core.system.annotation.Query");
         List<String> withClasses = readTypeArray(q, "with");
         List<String> withoutClasses = readTypeArray(q, "without");
         List<String> anyClasses = readTypeArray(q, "any");
+        String modeConst = readEnumConst(q, "mode"); // e.g., "SEQUENTIAL" or "PARALLEL"
+        boolean isParallel = "PARALLEL".equals(modeConst);
 
         JavaFileObject file = processingEnv.getFiler().createSourceFile(fqn, owner);
         try (Writer w = file.openWriter()) {
@@ -123,6 +133,7 @@ public class QueryProcessor extends AbstractProcessor {
             w.write("  private final com.ethnicthv.ecs.core.archetype.ArchetypeWorld world;\n");
             w.write("  private final " + ownerQualified + " system;\n");
             w.write("  private final java.lang.invoke.MethodHandle mh;\n");
+            w.write("  private static final boolean MODE_PARALLEL = " + (isParallel ? "true" : "false") + ";\n");
             // Precompute param classes array
             w.write("  private static final Class<?>[] PARAM_CLASSES = new Class<?>[]{");
             for (int i = 0; i < paramComponentClasses.size(); i++) {
@@ -130,30 +141,53 @@ public class QueryProcessor extends AbstractProcessor {
                 if (i < paramComponentClasses.size()-1) w.write(", ");
             }
             w.write("};\n");
+            // Boolean flags for whether each param is a ComponentHandle (unmanaged)
+            w.write("  private static final boolean[] IS_HANDLE = new boolean[]{");
+            for (int i = 0; i < paramIsHandle.size(); i++) {
+                w.write(paramIsHandle.get(i) ? "true" : "false");
+                if (i < paramIsHandle.size()-1) w.write(", ");
+            }
+            w.write("};\n");
+            // Declared parameter types for MH signature
+            w.write("  private static final Class<?>[] DECLARED_PARAM_TYPES = new Class<?>[]{");
+            for (int i = 0; i < paramDeclaredTypes.size(); i++) {
+                w.write(paramDeclaredTypes.get(i) + ".class");
+                if (i < paramDeclaredTypes.size()-1) w.write(", ");
+            }
+            w.write("};\n");
             w.write("  public " + name + "(com.ethnicthv.ecs.core.archetype.ArchetypeWorld w, " + ownerQualified + " s){ this.world=w; this.system=s; this.mh=createMH(); }\n");
 
-            // MH builder
+            // MH builder using declared parameter types (mixed managed/unmanaged)
             w.write("  private java.lang.invoke.MethodHandle createMH(){\n");
             w.write("    try {\n");
             w.write("      var lookup = java.lang.invoke.MethodHandles.lookup();\n");
             w.write("      var prv = java.lang.invoke.MethodHandles.privateLookupIn(" + ownerQualified + ".class, lookup);\n");
-            // Build MethodType: (ComponentHandle, ...)
             w.write("      var mt = java.lang.invoke.MethodType.methodType(void.class");
-            for (int i = 0; i < paramComponentClasses.size(); i++) {
-                w.write(", com.ethnicthv.ecs.core.components.ComponentHandle.class");
+            for (int i = 0; i < paramDeclaredTypes.size(); i++) {
+                w.write(", DECLARED_PARAM_TYPES[" + i + "]");
             }
             w.write(");\n");
             w.write("      return prv.findVirtual(" + ownerQualified + ".class, \"" + method.getSimpleName() + "\", mt);\n");
             w.write("    } catch (Throwable t) { throw new RuntimeException(t); }\n");
             w.write("  }\n");
 
-            // runQuery implementation - sequential
+            // runQuery implementation - dispatch to sequential or parallel
             w.write("  @Override public void runQuery(){\n");
-            w.write("    final var cm = world.getComponentManager();\n");
-            // Build paramIds
+            w.write("    if (MODE_PARALLEL) runParallel(); else runSequential();\n");
+            w.write("  }\n");
+
+            // Common helpers to compute param type ids and filters
+            w.write("  private int[] computeParamTypeIds() {\n");
             w.write("    final int paramCount = PARAM_CLASSES.length;\n");
             w.write("    final int[] paramIds = new int[paramCount];\n");
             w.write("    for (int i = 0; i < paramCount; i++) { Integer id = world.getComponentTypeId(PARAM_CLASSES[i]); if (id == null) throw new IllegalStateException(\"Component not registered: \" + PARAM_CLASSES[i]); paramIds[i] = id; }\n");
+            w.write("    return paramIds;\n");
+            w.write("  }\n");
+
+            // Sequential execution
+            w.write("  private void runSequential(){\n");
+            w.write("    final var cm = world.getComponentManager();\n");
+            w.write("    final int[] paramIds = computeParamTypeIds();\n");
             // Build filter ids arrays
             w.write("    final int[] withIds = new int[]{");
             for (int i = 0; i < withClasses.size(); i++) {
@@ -178,37 +212,101 @@ public class QueryProcessor extends AbstractProcessor {
             w.write("    for (com.ethnicthv.ecs.core.archetype.Archetype archetype : world.getAllArchetypes()) {\n");
             // Apply with/without/any filters by IDs
             w.write("      boolean ok = true;\n");
-            w.write("      // WITH\n");
-            w.write("      for (int id : withIds) { if (archetype.indexOfComponentType(id) < 0) { ok = false; break; } }\n");
+            w.write("      for (int id : withIds) { if (archetype.indexOfComponentType(id) < 0 && archetype.getManagedTypeIndex(id) < 0) { ok = false; break; } }\n");
             w.write("      if (!ok) continue;\n");
-            w.write("      // WITHOUT\n");
-            w.write("      for (int id : withoutIds) { if (archetype.indexOfComponentType(id) >= 0) { ok = false; break; } }\n");
+            w.write("      for (int id : withoutIds) { if (archetype.indexOfComponentType(id) >= 0 || archetype.getManagedTypeIndex(id) >= 0) { ok = false; break; } }\n");
             w.write("      if (!ok) continue;\n");
-            w.write("      // ANY\n");
-            w.write("      if (anyIds.length > 0) { boolean any=false; for (int id : anyIds) { if (archetype.indexOfComponentType(id) >= 0) { any=true; break; } } if (!any) continue; }\n");
+            w.write("      if (anyIds.length > 0) { boolean any=false; for (int id : anyIds) { if (archetype.indexOfComponentType(id) >= 0 || archetype.getManagedTypeIndex(id) >= 0) { any=true; break; } } if (!any) continue; }\n");
 
-            // Resolve component indices for parameters for this archetype
+            // Resolve indices for parameters for this archetype (unmanaged vs managed)
+            w.write("      final int paramCount = PARAM_CLASSES.length;\n");
             w.write("      final int[] compIdx = new int[paramCount];\n");
-            w.write("      for (int i = 0; i < paramCount; i++) { compIdx[i] = archetype.indexOfComponentType(paramIds[i]); if (compIdx[i] < 0) { ok=false; break; } }\n");
+            w.write("      final int[] managedIdx = new int[paramCount];\n");
+            w.write("      for (int i = 0; i < paramCount; i++) {\n");
+            w.write("        int tid = paramIds[i];\n");
+            w.write("        if (IS_HANDLE[i]) { compIdx[i] = archetype.indexOfComponentType(tid); if (compIdx[i] < 0) { ok=false; break; } managedIdx[i] = -1; }\n");
+            w.write("        else { managedIdx[i] = archetype.getManagedTypeIndex(tid); if (managedIdx[i] < 0) { ok=false; break; } compIdx[i] = -1; }\n");
+            w.write("      }\n");
             w.write("      if (!ok) continue;\n");
 
-            // Iterate chunks
-            w.write("      for (com.ethnicthv.ecs.core.api.archetype.IArchetypeChunk ch : archetype.getChunks()) {\n");
+            // Iterate chunks and entities
+            w.write("      for (com.ethnicthv.ecs.core.api.archetype.IArchetypeChunk ich : archetype.getChunks()) {\n");
+            w.write("        com.ethnicthv.ecs.core.archetype.ArchetypeChunk ch = (com.ethnicthv.ecs.core.archetype.ArchetypeChunk) ich;\n");
             w.write("        final int cap = ch.getCapacity();\n");
             w.write("        for (int ei = 0; ei < cap; ei++) { int eid = ch.getEntityId(ei); if (eid == -1) continue;\n");
-            // Acquire bound handles
             w.write("          com.ethnicthv.ecs.core.components.ComponentManager.BoundHandle[] bound = new com.ethnicthv.ecs.core.components.ComponentManager.BoundHandle[paramCount];\n");
             w.write("          try {\n");
-            w.write("            for (int k = 0; k < paramCount; k++) { var seg = ch.getComponentData(compIdx[k], ei); bound[k] = cm.acquireBoundHandle(PARAM_CLASSES[k], seg); }\n");
-            // Build args and invoke mh
             w.write("            Object[] args = new Object[paramCount + 1]; args[0] = system;\n");
-            w.write("            for (int k = 0; k < paramCount; k++) args[k+1] = bound[k].handle();\n");
+            w.write("            for (int k = 0; k < paramCount; k++) {\n");
+            w.write("              if (IS_HANDLE[k]) { var seg = ch.getComponentData(compIdx[k], ei); bound[k] = cm.acquireBoundHandle(PARAM_CLASSES[k], seg); args[k+1] = bound[k].handle(); }\n");
+            w.write("              else { Object inst = world.getManagedComponent(eid, PARAM_CLASSES[k]); args[k+1] = inst; }\n");
+            w.write("            }\n");
             w.write("            mh.invokeWithArguments(java.util.Arrays.asList(args));\n");
             w.write("          } catch (Throwable t) { throw new RuntimeException(t); }\n");
             w.write("          finally { for (int k = 0; k < paramCount; k++) { if (bound[k] != null) try { bound[k].close(); } catch (Exception ignore) {} } }\n");
             w.write("        }\n");
             w.write("      }\n");
             w.write("    }\n");
+            w.write("  }\n");
+
+            // Parallel execution
+            w.write("  private void runParallel(){\n");
+            w.write("    record WorkItem(com.ethnicthv.ecs.core.archetype.Archetype archetype, com.ethnicthv.ecs.core.archetype.ArchetypeChunk chunk, int entityId, int elementIndex, int[] compIdx, int[] managedIdx) {}\n");
+            w.write("    final java.util.List<WorkItem> tasks = new java.util.ArrayList<>();\n");
+            w.write("    final int[] paramIds = computeParamTypeIds();\n");
+            // Build filter ids arrays
+            w.write("    final int[] withIds = new int[]{");
+            for (int i = 0; i < withClasses.size(); i++) {
+                w.write("java.util.Objects.requireNonNull(world.getComponentTypeId(" + withClasses.get(i) + ".class)).intValue()");
+                if (i < withClasses.size()-1) w.write(",");
+            }
+            w.write("};\n");
+            w.write("    final int[] withoutIds = new int[]{");
+            for (int i = 0; i < withoutClasses.size(); i++) {
+                w.write("java.util.Objects.requireNonNull(world.getComponentTypeId(" + withoutClasses.get(i) + ".class)).intValue()");
+                if (i < withoutClasses.size()-1) w.write(",");
+            }
+            w.write("};\n");
+            w.write("    final int[] anyIds = new int[]{");
+            for (int i = 0; i < anyClasses.size(); i++) {
+                w.write("java.util.Objects.requireNonNull(world.getComponentTypeId(" + anyClasses.get(i) + ".class)).intValue()");
+                if (i < anyClasses.size()-1) w.write(",");
+            }
+            w.write("};\n");
+
+            // Build tasks per archetype and chunk
+            w.write("    for (com.ethnicthv.ecs.core.archetype.Archetype archetype : world.getAllArchetypes()) {\n");
+            w.write("      boolean ok = true;\n");
+            w.write("      for (int id : withIds) { if (archetype.indexOfComponentType(id) < 0 && archetype.getManagedTypeIndex(id) < 0) { ok = false; break; } }\n");
+            w.write("      if (!ok) continue;\n");
+            w.write("      for (int id : withoutIds) { if (archetype.indexOfComponentType(id) >= 0 || archetype.getManagedTypeIndex(id) >= 0) { ok = false; break; } }\n");
+            w.write("      if (!ok) continue;\n");
+            w.write("      if (anyIds.length > 0) { boolean any=false; for (int id : anyIds) { if (archetype.indexOfComponentType(id) >= 0 || archetype.getManagedTypeIndex(id) >= 0) { any=true; break; } } if (!any) continue; }\n");
+            w.write("      final int paramCount = PARAM_CLASSES.length;\n");
+            w.write("      final int[] compIdx = new int[paramCount];\n");
+            w.write("      final int[] managedIdx = new int[paramCount];\n");
+            w.write("      for (int i = 0; i < paramCount; i++) { int tid = paramIds[i]; if (IS_HANDLE[i]) { compIdx[i] = archetype.indexOfComponentType(tid); if (compIdx[i] < 0) { ok=false; break; } managedIdx[i] = -1; } else { managedIdx[i] = archetype.getManagedTypeIndex(tid); if (managedIdx[i] < 0) { ok=false; break; } compIdx[i] = -1; } }\n");
+            w.write("      if (!ok) continue;\n");
+            w.write("      com.ethnicthv.ecs.core.archetype.ArchetypeChunk[] chunks = archetype.getChunksSnapshot();\n");
+            w.write("      int count = archetype.chunkCount();\n");
+            w.write("      for (int ci = 0; ci < count; ci++) { com.ethnicthv.ecs.core.archetype.ArchetypeChunk ch = chunks[ci]; int idx = ch.nextOccupiedIndex(0); while (idx >= 0) { int eid = ch.getEntityId(idx); tasks.add(new WorkItem(archetype, ch, eid, idx, compIdx, managedIdx)); idx = ch.nextOccupiedIndex(idx + 1); } }\n");
+            w.write("    }\n");
+
+            // Execute in parallel
+            w.write("    final var cm = world.getComponentManager();\n");
+            w.write("    tasks.parallelStream().forEach(item -> {\n");
+            w.write("      final int paramCount = PARAM_CLASSES.length;\n");
+            w.write("      com.ethnicthv.ecs.core.components.ComponentManager.BoundHandle[] bound = new com.ethnicthv.ecs.core.components.ComponentManager.BoundHandle[paramCount];\n");
+            w.write("      try {\n");
+            w.write("        Object[] args = new Object[paramCount + 1]; args[0] = system;\n");
+            w.write("        for (int k = 0; k < paramCount; k++) {\n");
+            w.write("          if (IS_HANDLE[k]) { var seg = item.chunk().getComponentData(item.compIdx()[k], item.elementIndex()); bound[k] = cm.acquireBoundHandle(PARAM_CLASSES[k], seg); args[k+1] = bound[k].handle(); }\n");
+            w.write("          else { Object inst = world.getManagedComponent(item.entityId(), PARAM_CLASSES[k]); args[k+1] = inst; }\n");
+            w.write("        }\n");
+            w.write("        mh.invokeWithArguments(java.util.Arrays.asList(args));\n");
+            w.write("      } catch (Throwable t) { throw new RuntimeException(t); }\n");
+            w.write("      finally { for (int k = 0; k < bound.length; k++) { if (bound[k] != null) try { bound[k].close(); } catch (Exception ignore) {} } }\n");
+            w.write("    });\n");
             w.write("  }\n");
 
             w.write("}\n");
@@ -258,6 +356,17 @@ public class QueryProcessor extends AbstractProcessor {
             String s = String.valueOf(e.getValue().getValue());
             if (s.endsWith(".class")) return s.substring(0, s.length()-6);
             return s;
+        }
+        return null;
+    }
+
+    private String readEnumConst(AnnotationMirror am, String name) {
+        if (am == null) return null;
+        for (Map.Entry<? extends ExecutableElement, ? extends AnnotationValue> e : am.getElementValues().entrySet()) {
+            if (!e.getKey().getSimpleName().contentEquals(name)) continue;
+            Object v = e.getValue().getValue();
+            // v is a VariableElement representing enum constant
+            return v.toString().substring(v.toString().lastIndexOf('.') + 1);
         }
         return null;
     }

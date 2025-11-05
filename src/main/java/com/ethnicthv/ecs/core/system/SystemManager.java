@@ -62,16 +62,30 @@ public class SystemManager {
 
     private void tryInvokeGeneratedInjector(Object system) {
         Class<?> cls = system.getClass();
-        String injectorName = cls.getName() + "__QueryInjector";
-        try {
-            Class<?> inj = Class.forName(injectorName, false, cls.getClassLoader());
-            java.lang.reflect.Method m = inj.getMethod("inject", Object.class, com.ethnicthv.ecs.core.archetype.ArchetypeWorld.class);
-            m.invoke(null, system, world);
-        } catch (ClassNotFoundException e) {
-            // No generated injector; ignore
-        } catch (ReflectiveOperationException e) {
-            throw new IllegalStateException("Failed to invoke generated injector " + injectorName, e);
+        // First attempt: binary-name + suffix (works if processor used that scheme)
+        String injectorName1 = cls.getName() + "__QueryInjector";
+        // Second attempt: package + "." + simpleName + suffix (matches our processor output, including for nested classes)
+        String injectorName2 = cls.getPackageName() + "." + cls.getSimpleName() + "__QueryInjector";
+        ReflectiveOperationException last = null;
+        for (String injectorName : new String[]{ injectorName1, injectorName2 }) {
+            try {
+                Class<?> inj = Class.forName(injectorName, false, cls.getClassLoader());
+                java.lang.reflect.Method m = inj.getMethod("inject", Object.class, com.ethnicthv.ecs.core.archetype.ArchetypeWorld.class);
+                m.invoke(null, system, world);
+                return; // success
+            } catch (ClassNotFoundException e) {
+                // try next variant
+                last = e;
+            } catch (ReflectiveOperationException e) {
+                last = e;
+                break; // found class but failed to invoke
+            }
         }
+        ReflectiveOperationException roe = last;
+        if (!(last instanceof ClassNotFoundException)) {
+            throw new IllegalStateException("Failed to invoke generated injector for " + cls.getName(), roe);
+        }
+        // else: no generated injector; silently fall back to reflection injection
     }
 
     public List<Object> getRegisteredSystems() {
