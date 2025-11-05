@@ -33,11 +33,12 @@ public class SystemAPIDemo {
         world.registerComponent(PositionComponent.class);
         world.registerComponent(VelocityComponent.class);
         world.registerComponent(HealthComponent.class);
+        world.registerComponent(NameComponent.class);
 
         // Create entities
         System.out.println("Creating 10,000 entities...");
         for (int i = 0; i < 10000; i++) {
-            int entityId = world.createEntity(PositionComponent.class, VelocityComponent.class);
+            int entityId = world.createEntity(PositionComponent.class, VelocityComponent.class, HealthComponent.class, NameComponent.class);
 
             // Initialize with some data
             MemorySegment velocity = world.getComponent(entityId, VelocityComponent.class);
@@ -45,6 +46,22 @@ public class SystemAPIDemo {
                 velocity.set(ValueLayout.JAVA_FLOAT, 0, (float) Math.random() * 10);
                 velocity.set(ValueLayout.JAVA_FLOAT, 4, (float) Math.random() * 10);
             }
+
+            MemorySegment position = world.getComponent(entityId, PositionComponent.class);
+            if (position != null) {
+                position.set(ValueLayout.JAVA_FLOAT, 0, (float) Math.random() * 100);
+                position.set(ValueLayout.JAVA_FLOAT, 4, (float) Math.random() * 100);
+            }
+
+            MemorySegment health = world.getComponent(entityId, HealthComponent.class);
+            if (health != null) {
+                health.set(ValueLayout.JAVA_INT, 0, 50); // current health
+                health.set(ValueLayout.JAVA_INT, 4, 100); // max health
+            }
+
+            NameComponent nameComp = new NameComponent();
+            nameComp.name = "Entity_" + entityId;
+            world.setManagedComponent(entityId, nameComp);
         }
 
         // Create and register systems
@@ -53,6 +70,9 @@ public class SystemAPIDemo {
 
         HealthRegenerationSystem healthSystem = new HealthRegenerationSystem();
         systemManager.registerSystem(healthSystem);
+
+        MixedUnmanagedAndManagedSystem mixedSystem = new MixedUnmanagedAndManagedSystem();
+        systemManager.registerSystem(mixedSystem);
 
         System.out.println("\n=== Running Systems ===\n");
 
@@ -67,6 +87,12 @@ public class SystemAPIDemo {
         healthSystem.update();
         long healthTime = System.nanoTime() - startTime;
         System.out.printf("HealthRegenerationSystem (SEQUENTIAL): %.2f ms%n", healthTime / 1_000_000.0);
+
+        // Run mixed system (PARALLEL)
+        startTime = System.nanoTime();
+        mixedSystem.update();
+        long mixedTime = System.nanoTime() - startTime;
+        System.out.printf("MixedUnmanagedAndManagedSystem (PARALLEL): %.2f ms%n", mixedTime / 1_000_000.0);
 
         System.out.println("\n=== Demo Complete ===");
 
@@ -136,6 +162,35 @@ public class SystemAPIDemo {
                 health = Math.min(maxHealth, health + (int) (10 * 0.1f));
                 HealthComponentAccess.setCurrentHealth(healthHandle, health);
             }
+        }
+    }
+
+    static class MixedUnmanagedAndManagedSystem {
+        private IQuery mixedEntities;
+
+        void update() {
+            mixedEntities.runQuery();
+        }
+
+        @Query(
+                fieldInject = "mixedEntities",
+                mode = ExecutionMode.PARALLEL,
+                with = { PositionComponent.class, HealthComponent.class }
+        )
+        private void query(
+                @Component(type = PositionComponent.class) ComponentHandle positionHandle,
+                NameComponent nameComponent
+        ) {
+            // Update position
+            float x = PositionComponentAccess.getX(positionHandle);
+            float y = PositionComponentAccess.getY(positionHandle);
+            x += 1.0f;
+            y += 1.0f;
+            PositionComponentAccess.setX(positionHandle, x);
+            PositionComponentAccess.setY(positionHandle, y);
+
+            // log name from managed component
+            System.out.println("Entity Name: " + nameComponent.name);
         }
     }
 }
