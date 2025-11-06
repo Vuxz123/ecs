@@ -8,7 +8,7 @@ import org.junit.platform.suite.api.SuiteDisplayName;
  * Comprehensive test suite for all Archetype-related tests.
  * This suite runs all tests for ArchetypeChunk, Archetype, parallel query functionality,
  * the new System API with @Query annotation, and comprehensive QA/QC tests.
- *
+ * 
  * QA/QC Test Categories:
  * - Thread Safety: Concurrent operations and race condition tests
  * - Memory Safety: Resource management and memory leak detection
@@ -27,7 +27,7 @@ import org.junit.platform.suite.api.SuiteDisplayName;
         ManagedComponentStoreTest.class,
         ManagedIntegrationTest.class,
         MixedManagedUnmanagedRunnerTest.class,
-
+        
         // QA/QC Professional Test Suites
         ArchetypeThreadSafetyTest.class,
         ArchetypeMemorySafetyTest.class,

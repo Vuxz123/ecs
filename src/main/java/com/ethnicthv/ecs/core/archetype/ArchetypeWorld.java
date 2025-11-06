@@ -1,13 +1,14 @@
 package com.ethnicthv.ecs.core.archetype;
 
-
 import com.ethnicthv.ecs.core.api.archetype.IQueryBuilder;
 import com.ethnicthv.ecs.core.components.ComponentDescriptor;
 import com.ethnicthv.ecs.core.components.ComponentManager;
 import com.ethnicthv.ecs.core.components.ManagedComponentStore;
+import com.ethnicthv.ecs.core.components.SharedComponentStore;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.util.Arrays;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -28,6 +29,8 @@ public final class ArchetypeWorld implements AutoCloseable {
     private final AtomicInteger nextComponentTypeId = new AtomicInteger(0);
     // New: global store for managed components
     private final ManagedComponentStore managedStore = new ManagedComponentStore();
+    // New: store for managed shared components (de-duplicated)
+    final SharedComponentStore sharedStore = new SharedComponentStore();
 
     public ArchetypeWorld(ComponentManager componentManager) {
         this.arena = Arena.ofShared();
@@ -40,7 +43,6 @@ public final class ArchetypeWorld implements AutoCloseable {
     }
 
     /**
-    @Override
      * Register a component type via ComponentManager
      */
     public <T> int registerComponent(Class<T> componentClass) {
@@ -57,15 +59,15 @@ public final class ArchetypeWorld implements AutoCloseable {
 
     /**
      * Create a new entity
-    @Override
      */
     public int createEntity() {
         int entityId = nextEntityId.getAndIncrement();
         // Start with empty archetype (no components)
         ComponentMask emptyMask = new ComponentMask();
         Archetype archetype = archetypeManager.getOrCreateArchetype(emptyMask);
-        ArchetypeChunk.ChunkLocation location = archetype.addEntity(entityId);
-        entityRecords.put(entityId, new EntityRecord(archetype, location, emptyMask));
+        ChunkGroup group = archetype.getOrCreateChunkGroup(new SharedValueKey(null, null));
+        ArchetypeChunk.ChunkLocation location = group.addEntity(entityId);
+        entityRecords.put(entityId, new EntityRecord(archetype, location, emptyMask, new SharedValueKey(null, null)));
         return entityId;
     }
 
@@ -136,10 +138,11 @@ public final class ArchetypeWorld implements AutoCloseable {
 
         // 3. Get or create the target archetype
         Archetype archetype = archetypeManager.getOrCreateArchetype(mask);
+        ChunkGroup group = archetype.getOrCreateChunkGroup(new SharedValueKey(null, null));
 
         // 4. Add the entity to the archetype and store its record
-        ArchetypeChunk.ChunkLocation location = archetype.addEntity(entityId);
-        entityRecords.put(entityId, new EntityRecord(archetype, location, mask));
+        ArchetypeChunk.ChunkLocation location = group.addEntity(entityId);
+        entityRecords.put(entityId, new EntityRecord(archetype, location, mask, new SharedValueKey(null, null)));
 
         // 5. Allocate and assign default (zeroed) memory for each unmanaged component
         for (Class<?> componentClass : componentClasses) {
@@ -181,8 +184,8 @@ public final class ArchetypeWorld implements AutoCloseable {
         // Create new mask with the additional component
         ComponentMask newMask = record.mask.set(componentTypeId);
 
-        // Move entity to new archetype
-        moveEntityToArchetype(entityId, record, newMask);
+        // Move entity to new archetype (preserve shared key)
+        moveEntityToArchetype(entityId, record, record.mask, newMask, record.sharedKey);
 
         // Set component data
         EntityRecord newRecord = entityRecords.get(entityId);
@@ -218,7 +221,7 @@ public final class ArchetypeWorld implements AutoCloseable {
 
         // 2) Structural change: move entity to new archetype that includes this component
         ComponentMask newMask = record.mask.set(componentTypeId);
-        moveEntityToArchetype(entityId, record, newMask);
+        moveEntityToArchetype(entityId, record, record.mask, newMask, record.sharedKey);
 
         // 3) Wire ticket into the new chunk's managed index array
         EntityRecord newRecord = entityRecords.get(entityId);
@@ -261,8 +264,8 @@ public final class ArchetypeWorld implements AutoCloseable {
         // Create new mask without the component
         ComponentMask newMask = record.mask.clear(componentTypeId);
 
-        // Move entity to new archetype
-        moveEntityToArchetype(entityId, record, newMask);
+        // Move entity to new archetype, preserve shared key
+        moveEntityToArchetype(entityId, record, record.mask, newMask, record.sharedKey);
     }
 
     /**
@@ -311,7 +314,15 @@ public final class ArchetypeWorld implements AutoCloseable {
                     if (ticket >= 0) managedStore.release(ticket);
                 }
             }
-            record.archetype.removeEntity(record.location);
+            // Release shared managed tickets referenced by key
+            if (record.sharedKey != null && record.sharedKey.managedSharedIndices() != null) {
+                for (int idx : record.sharedKey.managedSharedIndices()) {
+                    if (idx >= 0) sharedStore.releaseSharedIndex(idx);
+                }
+            }
+            // Remove from the correct chunk group
+            ChunkGroup group = record.archetype.getChunkGroup(record.sharedKey);
+            if (group != null) group.removeEntity(record.location);
         }
     }
 
@@ -415,58 +426,114 @@ public final class ArchetypeWorld implements AutoCloseable {
         chunk.setManagedTicket(mIdx, record.location.indexInChunk, newTicket);
     }
 
+    // ============ Shared Component APIs ============
+
+    public <T> void setSharedComponent(int entityId, T managedValue) {
+        if (managedValue == null) throw new IllegalArgumentException("managedValue must not be null");
+        Class<?> type = managedValue.getClass();
+        Integer typeId = componentTypeIds.get(type);
+        if (typeId == null) throw new IllegalArgumentException("Shared component type not registered: " + type.getName());
+        ComponentDescriptor desc = componentManager.getDescriptor(type);
+        if (desc == null || desc.getKind() != ComponentDescriptor.ComponentKind.SHARED_MANAGED) {
+            throw new IllegalArgumentException("Type is not a @SharedComponent managed type: " + type.getName());
+        }
+        EntityRecord record = entityRecords.get(entityId);
+        if (record == null) throw new IllegalArgumentException("Entity does not exist: " + entityId);
+        int ticket = sharedStore.getOrAddSharedIndex(managedValue);
+        SharedValueKey oldKey = record.sharedKey;
+        int[] managedIdx;
+        if (oldKey != null && oldKey.managedSharedIndices() != null) {
+            managedIdx = oldKey.managedSharedIndices().clone();
+        } else {
+            managedIdx = new int[record.archetype.getSharedManagedTypeIds().length];
+            Arrays.fill(managedIdx, -1);
+        }
+        int pos = record.archetype.getSharedManagedIndex(typeId);
+        if (pos < 0) throw new IllegalArgumentException("Shared managed type not part of this archetype: id=" + typeId);
+        int old = managedIdx[pos];
+        managedIdx[pos] = ticket;
+        SharedValueKey newKey = new SharedValueKey(managedIdx, oldKey != null ? oldKey.unmanagedSharedValues() : null);
+        if (oldKey != null && Arrays.equals(oldKey.managedSharedIndices(), managedIdx)) return;
+        moveEntityToArchetype(entityId, record, record.mask, record.mask, newKey);
+        if (oldKey != null && old >= 0 && old != ticket) sharedStore.releaseSharedIndex(old);
+    }
+
+    public void setSharedComponent(int entityId, Class<?> unmanagedSharedType, long value) {
+        Integer typeId = componentTypeIds.get(unmanagedSharedType);
+        if (typeId == null) throw new IllegalArgumentException("Shared component type not registered: " + unmanagedSharedType.getName());
+        ComponentDescriptor desc = componentManager.getDescriptor(unmanagedSharedType);
+        if (desc == null || desc.getKind() != ComponentDescriptor.ComponentKind.SHARED_UNMANAGED) {
+            throw new IllegalArgumentException("Type is not an @UnmanagedSharedComponent type: " + unmanagedSharedType.getName());
+        }
+        EntityRecord record = entityRecords.get(entityId);
+        if (record == null) throw new IllegalArgumentException("Entity does not exist: " + entityId);
+        SharedValueKey oldKey = record.sharedKey;
+        long[] unmanagedVals;
+        if (oldKey != null && oldKey.unmanagedSharedValues() != null) {
+            unmanagedVals = oldKey.unmanagedSharedValues().clone();
+        } else {
+            unmanagedVals = new long[record.archetype.getSharedUnmanagedTypeIds().length];
+            Arrays.fill(unmanagedVals, Long.MIN_VALUE);
+        }
+        int pos = record.archetype.getSharedUnmanagedIndex(typeId);
+        if (pos < 0) throw new IllegalArgumentException("Shared unmanaged type not part of this archetype: id=" + typeId);
+        unmanagedVals[pos] = value;
+        SharedValueKey newKey = new SharedValueKey(oldKey != null ? oldKey.managedSharedIndices() : null, unmanagedVals);
+        if (oldKey != null && Arrays.equals(oldKey.unmanagedSharedValues(), unmanagedVals)) return;
+        moveEntityToArchetype(entityId, record, record.mask, record.mask, newKey);
+    }
+
+    // Expose non-mutating shared index lookup for query building
+    public int findSharedIndex(Object value) {
+        return sharedStore.findIndex(value);
+    }
+
     // ============ Internal Methods ============
 
-    private void moveEntityToArchetype(int entityId, EntityRecord oldRecord, ComponentMask newMask) {
+    private void moveEntityToArchetype(int entityId, EntityRecord oldRecord, ComponentMask oldMask, ComponentMask newMask, SharedValueKey newSharedKey) {
         // Delegate archetype construction to ArchetypeManager
         Archetype newArchetype = archetypeManager.getOrCreateArchetype(newMask);
+        ChunkGroup newGroup = newArchetype.getOrCreateChunkGroup(newSharedKey);
+        ArchetypeChunk.ChunkLocation newLocation = newGroup.addEntity(entityId);
 
-        // Copy existing unmanaged component data (only components present in both)
-        ArchetypeChunk.ChunkLocation newLocation = newArchetype.addEntity(entityId);
-        int[] componentIds = newMask.toComponentIdArray();
-        for (int componentTypeId : componentIds) {
-            if (oldRecord.mask.has(componentTypeId)) {
+        // Copy unmanaged instance data intersection
+        int[] typeIds = newMask.toComponentIdArray();
+        for (int componentTypeId : typeIds) {
+            if (oldMask.has(componentTypeId)) {
                 int oldIdx = oldRecord.archetype.indexOfComponentType(componentTypeId);
                 int newIdx = newArchetype.indexOfComponentType(componentTypeId);
                 if (oldIdx >= 0 && newIdx >= 0) {
                     MemorySegment oldData = oldRecord.archetype.getComponentData(oldRecord.location, oldIdx);
-                    if (oldData != null) {
-                        newArchetype.setComponentData(newLocation, newIdx, oldData);
-                    }
+                    if (oldData != null) newArchetype.setComponentData(newLocation, newIdx, oldData);
                 }
             }
         }
 
-        // Transfer managed tickets for intersection of managed types
+        // Transfer managed instance tickets intersection
         int[] oldManaged = oldRecord.archetype.getManagedTypeIds();
         int[] newManaged = newArchetype.getManagedTypeIds();
         if (oldManaged != null && newManaged != null && oldManaged.length > 0 && newManaged.length > 0) {
             ArchetypeChunk oldChunk = oldRecord.archetype.getChunk(oldRecord.location.chunkIndex);
             ArchetypeChunk newChunk = newArchetype.getChunk(newLocation.chunkIndex);
             for (int tid : oldManaged) {
-                // If this managed component remains present in new archetype
-                // We check presence via getManagedTypeIndex
                 int oldMIdx = oldRecord.archetype.getManagedTypeIndex(tid);
                 int newMIdx = newArchetype.getManagedTypeIndex(tid);
                 if (oldMIdx >= 0 && newMIdx >= 0) {
                     int ticket = oldChunk.getManagedTicket(oldMIdx, oldRecord.location.indexInChunk);
-                    if (ticket >= 0) {
-                        newChunk.setManagedTicket(newMIdx, newLocation.indexInChunk, ticket);
-                    }
+                    if (ticket >= 0) newChunk.setManagedTicket(newMIdx, newLocation.indexInChunk, ticket);
                 }
             }
         }
 
-        // Remove from old archetype (also clears managed tickets via zeroing)
-        oldRecord.archetype.removeEntity(oldRecord.location);
-
-        // Update entity record
-        entityRecords.put(entityId, new EntityRecord(newArchetype, newLocation, newMask));
+        // Remove from old group and update
+        ChunkGroup oldGroup = oldRecord.archetype.getChunkGroup(oldRecord.sharedKey);
+        if (oldGroup != null) oldGroup.removeEntity(oldRecord.location);
+        entityRecords.put(entityId, new EntityRecord(newArchetype, newLocation, newMask, newSharedKey));
     }
 
     // ============ Internal Records ============
 
-    record EntityRecord(Archetype archetype, ArchetypeChunk.ChunkLocation location, ComponentMask mask) {}
+    record EntityRecord(Archetype archetype, ArchetypeChunk.ChunkLocation location, ComponentMask mask, SharedValueKey sharedKey) {}
 
     public record ComponentMetadata(int id, Class<?> type, long size) {}
 }

@@ -95,35 +95,73 @@ public class QueryProcessor extends AbstractProcessor {
         boolean isPrivate = method.getModifiers().contains(Modifier.PRIVATE);
         String methodName = method.getSimpleName().toString();
 
-        // Collect parameter component classes from @Component(type=...)
+        // Detect @Id field on owner (at most one, must be int)
+        String idFieldName = null;
+        for (Element e : owner.getEnclosedElements()) {
+            if (e.getKind() != ElementKind.FIELD) continue;
+            boolean hasId = false;
+            for (AnnotationMirror am : e.getAnnotationMirrors()) {
+                Element ae = am.getAnnotationType().asElement();
+                if (ae instanceof TypeElement te && te.getQualifiedName().contentEquals("com.ethnicthv.ecs.core.system.annotation.Id")) {
+                    hasId = true; break;
+                }
+            }
+            if (!hasId) continue;
+            if (idFieldName != null) { error("Only one @Id field is allowed per @Query method owner %s", owner.getQualifiedName()); break; }
+            // Type must be primitive int
+            String ft = e.asType().toString();
+            if (!"int".equals(ft)) { error("@Id field must be of type int: %s.%s", owner.getQualifiedName(), e.getSimpleName()); break; }
+            idFieldName = e.getSimpleName().toString();
+        }
+        boolean hasIdField = (idFieldName != null);
+
+        // Detect @Id parameter (at most one; type must be int or java.lang.Integer)
+        int idParamIndex = -1;
+        List<? extends VariableElement> methodParams = method.getParameters();
+        for (int i = 0; i < methodParams.size(); i++) {
+            VariableElement p = methodParams.get(i);
+            AnnotationMirror idAnno = getAnnotation(p, "com.ethnicthv.ecs.core.system.annotation.Id");
+            if (idAnno == null) continue;
+            if (idParamIndex != -1) { error("Only one @Id parameter is allowed on method %s", method); break; }
+            String dt = p.asType().toString();
+            if (!"int".equals(dt) && !"java.lang.Integer".equals(dt)) { error("@Id parameter must be int or java.lang.Integer on method %s", method); break; }
+            idParamIndex = i;
+        }
+
+        // Collect parameter component classes, skipping @Id parameter
         List<String> paramComponentClasses = new ArrayList<>();
         List<String> paramDeclaredTypes = new ArrayList<>();
-        // Track direct binder method names per param (null if not available)
+        List<Integer> logicalToPhysical = new ArrayList<>(); // map logical comp param index -> physical method index
+        List<String> expectedHandleClasses = new ArrayList<>();
         List<String> directBinderNames = new ArrayList<>();
-        for (VariableElement p : method.getParameters()) {
+        for (int phys = 0; phys < methodParams.size(); phys++) {
+            if (phys == idParamIndex) continue; // skip @Id param from component processing
+            VariableElement p = methodParams.get(phys);
             AnnotationMirror compAnno = getAnnotation(p, "com.ethnicthv.ecs.core.system.annotation.Component");
             String declaredType = p.asType().toString();
+            String compTypeFqn;
             if (compAnno != null) {
-                // Unmanaged param: component type is specified in annotation
-                String typeClass = readTypeClass(compAnno, "type");
-                if (typeClass == null) {
-                    error("@Component on %s must specify type()", p);
-                    continue;
-                }
-                paramComponentClasses.add(typeClass);
-                paramDeclaredTypes.add(declaredType);
+                compTypeFqn = readTypeClass(compAnno, "type");
+                if (compTypeFqn == null || compTypeFqn.isEmpty()) { error("@Component on %s must specify type()", p); continue; }
             } else {
-                // Managed direct param: declared type is the component type
-                paramComponentClasses.add(declaredType);
-                paramDeclaredTypes.add(declaredType);
+                if ("com.ethnicthv.ecs.core.components.ComponentHandle".equals(declaredType)) { error("Parameter %s must be annotated with @Component(type=...) to specify component type", p); continue; }
+                if (declaredType.endsWith("Handle")) {
+                    String base = declaredType.substring(0, declaredType.length() - "Handle".length());
+                    compTypeFqn = (elementUtils.getTypeElement(base) != null) ? base : declaredType;
+                } else compTypeFqn = declaredType;
             }
-            // Determine direct binder availability for typed unmanaged params (declared type != ComponentHandle)
+            paramComponentClasses.add(compTypeFqn);
+            paramDeclaredTypes.add(declaredType);
+            logicalToPhysical.add(phys);
+            int lastDot = compTypeFqn.lastIndexOf('.');
+            String compPkg = (lastDot >= 0) ? compTypeFqn.substring(0, lastDot) : "";
+            String compSimple = (lastDot >= 0) ? compTypeFqn.substring(lastDot+1) : compTypeFqn;
+            String handleFqn = (compPkg.isEmpty() ? compSimple + "Handle" : compPkg + "." + compSimple + "Handle");
+            expectedHandleClasses.add(handleFqn);
             String binderName = null;
             if (!"com.ethnicthv.ecs.core.components.ComponentHandle".equals(declaredType)) {
                 TypeElement declEl = elementUtils.getTypeElement(declaredType);
-                if (declEl != null) {
-                    binderName = findPublicBinderMethodName(declEl);
-                }
+                if (declEl != null) binderName = findPublicBinderMethodName(declEl);
             }
             directBinderNames.add(binderName);
         }
@@ -133,7 +171,7 @@ public class QueryProcessor extends AbstractProcessor {
         List<String> withClasses = readTypeArray(q, "with");
         List<String> withoutClasses = readTypeArray(q, "without");
         List<String> anyClasses = readTypeArray(q, "any");
-        String modeConst = readEnumConst(q, "mode"); // e.g., "SEQUENTIAL" or "PARALLEL"
+        String modeConst = readEnumConst(q, "mode");
         boolean isParallel = "PARALLEL".equals(modeConst);
 
         JavaFileObject file = processingEnv.getFiler().createSourceFile(fqn, owner);
@@ -147,6 +185,9 @@ public class QueryProcessor extends AbstractProcessor {
             if (isPrivate) {
                 w.write("  private final java.lang.invoke.MethodHandle invExact;\n");
             }
+            // Emit ID field support
+            w.write("  private static final boolean HAS_ID_FIELD = " + (hasIdField ? "true" : "false") + ";\n");
+            w.write("  private final java.lang.reflect.Field ID_FIELD;\n");
             w.write("  private static final boolean MODE_PARALLEL = " + (isParallel ? "true" : "false") + ";\n");
             // Param classes & flags
             w.write("  private static final Class<?>[] PARAM_CLASSES = new Class<?>[]{");
@@ -161,6 +202,13 @@ public class QueryProcessor extends AbstractProcessor {
             for (int i = 0; i < paramDeclaredTypes.size(); i++) {
                 w.write(paramDeclaredTypes.get(i) + ".class");
                 if (i < paramDeclaredTypes.size()-1) w.write(", ");
+            }
+            w.write("};\n");
+            // Expected generated handle class names
+            w.write("  private static final String[] HANDLE_CLASS_NAMES = new String[]{");
+            for (int i = 0; i < expectedHandleClasses.size(); i++) {
+                w.write("\"" + expectedHandleClasses.get(i) + "\"");
+                if (i < expectedHandleClasses.size()-1) w.write(", ");
             }
             w.write("};\n");
             // Filter class arrays
@@ -182,12 +230,11 @@ public class QueryProcessor extends AbstractProcessor {
             w.write("  private final com.ethnicthv.ecs.core.archetype.ComponentMask withMask;\n");
             w.write("  private final com.ethnicthv.ecs.core.archetype.ComponentMask withoutMask;\n");
             w.write("  private final com.ethnicthv.ecs.core.archetype.ComponentMask anyMask;\n");
-            // Managed/unmanaged decision based on descriptor, not declared type
+            // Managed/unmanaged decision
             w.write("  private final boolean[] PARAM_IS_MANAGED;\n");
-            w.write("  private final boolean[] PARAM_EXPECTS_RAW_HANDLE;\n");
             w.write("  private final java.lang.invoke.MethodHandle[] BINDER_MH;\n");
             w.write("  private final com.ethnicthv.ecs.core.components.ComponentDescriptor[] PARAM_DESCRIPTORS;\n");
-            // For codegen specialization: which params have direct binder
+            // Direct binder availability
             w.write("  private static final boolean[] DIRECT_BIND = new boolean[]{");
             for (int i = 0; i < directBinderNames.size(); i++) { w.write(directBinderNames.get(i) != null ? "true" : "false"); if (i < directBinderNames.size()-1) w.write(", "); }
             w.write("};\n");
@@ -212,6 +259,12 @@ public class QueryProcessor extends AbstractProcessor {
             } else {
                 w.write("    this.world=w; this.system=s;\n");
             }
+            // Initialize ID_FIELD
+            if (hasIdField) {
+                w.write("    try { java.lang.reflect.Field __idf = " + ownerQualified + ".class.getDeclaredField(\"" + idFieldName + "\"); __idf.setAccessible(true); this.ID_FIELD = __idf; } catch (Throwable t) { throw new RuntimeException(t); }\n");
+            } else {
+                w.write("    this.ID_FIELD = null;\n");
+            }
             // compute ids and masks once
             w.write("    this.paramIds = new int[PARAM_COUNT];\n");
             w.write("    for (int i = 0; i < PARAM_COUNT; i++) { Integer id = world.getComponentTypeId(PARAM_CLASSES[i]); if (id == null) throw new IllegalStateException(\"Component not registered: \" + PARAM_CLASSES[i]); this.paramIds[i] = id; }\n");
@@ -222,9 +275,8 @@ public class QueryProcessor extends AbstractProcessor {
             w.write("    com.ethnicthv.ecs.core.archetype.ComponentMask.Builder wb = com.ethnicthv.ecs.core.archetype.ComponentMask.builder(); for (int id : this.withIds) wb.with(id); for (int id : this.paramIds) wb.with(id); this.withMask = wb.build();\n");
             w.write("    com.ethnicthv.ecs.core.archetype.ComponentMask.Builder woutb = com.ethnicthv.ecs.core.archetype.ComponentMask.builder(); for (int id : this.withoutIds) woutb.with(id); this.withoutMask = woutb.build();\n");
             w.write("    com.ethnicthv.ecs.core.archetype.ComponentMask.Builder ab = com.ethnicthv.ecs.core.archetype.ComponentMask.builder(); for (int id : this.anyIds) ab.with(id); this.anyMask = ab.build();\n");
-            // Determine param kinds and prepare binders
+            // Determine param kinds and prepare binders using annotation-derived managed/unmanaged + declared type
             w.write("    this.PARAM_IS_MANAGED = new boolean[PARAM_COUNT];\n");
-            w.write("    this.PARAM_EXPECTS_RAW_HANDLE = new boolean[PARAM_COUNT];\n");
             w.write("    this.BINDER_MH = new java.lang.invoke.MethodHandle[PARAM_COUNT];\n");
             w.write("    this.PARAM_DESCRIPTORS = new com.ethnicthv.ecs.core.components.ComponentDescriptor[PARAM_COUNT];\n");
             w.write("    final var __cmgr = world.getComponentManager();\n");
@@ -232,11 +284,18 @@ public class QueryProcessor extends AbstractProcessor {
             w.write("    for (int i = 0; i < PARAM_COUNT; i++) {\n");
             w.write("      var __desc = __cmgr.getDescriptor(PARAM_CLASSES[i]); if (__desc == null) throw new IllegalStateException(\"Descriptor not found for component: \" + PARAM_CLASSES[i].getName());\n");
             w.write("      this.PARAM_IS_MANAGED[i] = __desc.isManaged();\n");
-            w.write("      this.PARAM_EXPECTS_RAW_HANDLE[i] = (DECLARED_PARAM_TYPES[i] == com.ethnicthv.ecs.core.components.ComponentHandle.class);\n");
             w.write("      this.PARAM_DESCRIPTORS[i] = __desc;\n");
-            w.write("      this.STRATEGY[i] = this.PARAM_IS_MANAGED[i] ? ParamStrategy.MANAGED : (this.PARAM_EXPECTS_RAW_HANDLE[i] ? ParamStrategy.UNMANAGED_RAW : ParamStrategy.UNMANAGED_TYPED);\n");
-            // Only prepare MethodHandle binder when no direct binder is available and param is typed unmanaged
-            w.write("      if (!this.PARAM_IS_MANAGED[i] && !this.PARAM_EXPECTS_RAW_HANDLE[i] && !DIRECT_BIND[i]) {\n");
+            w.write("      boolean declaredIsRawHandle = (DECLARED_PARAM_TYPES[i] == com.ethnicthv.ecs.core.components.ComponentHandle.class);\n");
+            w.write("      boolean declaredIsGeneratedHandle = DECLARED_PARAM_TYPES[i].getName().equals(HANDLE_CLASS_NAMES[i]);\n");
+            w.write("      if (this.PARAM_IS_MANAGED[i]) {\n");
+            w.write("        this.STRATEGY[i] = ParamStrategy.MANAGED;\n");
+            w.write("      } else {\n");
+            w.write("        if (declaredIsRawHandle) { this.STRATEGY[i] = ParamStrategy.UNMANAGED_RAW; }\n");
+            w.write("        else if (declaredIsGeneratedHandle || DIRECT_BIND[i]) { this.STRATEGY[i] = ParamStrategy.UNMANAGED_TYPED; }\n");
+            w.write("        else { throw new IllegalStateException(\"Parameter type \" + DECLARED_PARAM_TYPES[i].getName() + \" is invalid for unmanaged component \" + PARAM_CLASSES[i].getName() + \". Use ComponentHandle or the generated Handle class.\"); }\n");
+            w.write("      }\n");
+            // Prepare MethodHandle binder only if needed and not direct
+            w.write("      if (!this.PARAM_IS_MANAGED[i] && this.STRATEGY[i] == ParamStrategy.UNMANAGED_TYPED && !DIRECT_BIND[i]) {\n");
             w.write("        try {\n");
             w.write("          var __prv = java.lang.invoke.MethodHandles.privateLookupIn(DECLARED_PARAM_TYPES[i], __lookup);\n");
             w.write("          java.lang.invoke.MethodHandle __bh = null;\n");
@@ -253,15 +312,20 @@ public class QueryProcessor extends AbstractProcessor {
             w.write("    validateConfig();\n");
             w.write("  }\n");
 
-            // Emit createMH only when needed
             if (isPrivate) {
                 w.write("  private java.lang.invoke.MethodHandle createMH(){\n");
                 w.write("    try {\n");
                 w.write("      var lookup = java.lang.invoke.MethodHandles.lookup();\n");
                 w.write("      var prv = java.lang.invoke.MethodHandles.privateLookupIn(" + ownerQualified + ".class, lookup);\n");
+                // Build method type for ALL method parameters (including @Id)
                 w.write("      var mt = java.lang.invoke.MethodType.methodType(void.class");
-                for (String paramDeclaredType : paramDeclaredTypes) {
-                    w.write(", " + paramDeclaredType + ".class");
+                for (VariableElement methodParam : methodParams) {
+                    String t = methodParam.asType().toString();
+                    if ("int".equals(t)) {
+                        w.write(", int.class");
+                    } else {
+                        w.write(", " + t + ".class");
+                    }
                 }
                 w.write(");\n");
                 w.write("      return prv.findVirtual(" + ownerQualified + ".class, \"" + methodName + "\", mt);\n");
@@ -269,28 +333,24 @@ public class QueryProcessor extends AbstractProcessor {
                 w.write("  }\n");
             }
 
-            // Emit validateConfig using descriptor-managed info and filter coverage
+            // validate config
             w.write("  private void validateConfig(){\n");
             w.write("    for (int i = 0; i < paramIds.length; i++) {\n");
             w.write("      boolean isManaged = PARAM_IS_MANAGED[i];\n");
             w.write("      if (isManaged) {\n");
-            w.write("        // Managed descriptor: method parameter must be the managed component type\n");
             w.write("        if (DECLARED_PARAM_TYPES[i] != PARAM_CLASSES[i]) { throw new IllegalStateException(\"Parameter type mismatch: component \" + PARAM_CLASSES[i].getName() + \" is @Managed, method parameter must be that component type\"); }\n");
             w.write("      } else {\n");
-            w.write("        // Unmanaged descriptor: declaring the component type directly implies a managed object, which is invalid\n");
-            w.write("        if (DECLARED_PARAM_TYPES[i] == PARAM_CLASSES[i]) { throw new IllegalStateException(\"Parameter \" + i + \" declared as managed object (\" + PARAM_CLASSES[i].getName() + \") but component is unmanaged. Use ComponentHandle or a typed handle class with __bind(ComponentHandle).\"); }\n");
+            w.write("        if (DECLARED_PARAM_TYPES[i] == PARAM_CLASSES[i]) { throw new IllegalStateException(\"Parameter \" + i + \" declared as managed object (\" + PARAM_CLASSES[i].getName() + \") but component is unmanaged. Use ComponentHandle or the generated Handle class.\"); }\n");
             w.write("      }\n");
             w.write("    }\n");
+            w.write("    if (HAS_ID_FIELD && MODE_PARALLEL) { throw new IllegalStateException(\"@Id field is not supported with PARALLEL Query mode; use SEQUENTIAL.\"); }\n");
             w.write("  }\n");
 
-            // Helper: plan builder
             w.write("  private ArchetypePlan buildPlan(com.ethnicthv.ecs.core.archetype.Archetype archetype){\n");
             w.write("    final int[] compIdx = new int[PARAM_COUNT]; final int[] managedIdx = new int[PARAM_COUNT]; boolean ok = true;\n");
             w.write("    for (int i = 0; i < PARAM_COUNT; i++) { int tid = paramIds[i]; if (!PARAM_IS_MANAGED[i]) { compIdx[i] = archetype.indexOfComponentType(tid); if (compIdx[i] < 0) { ok=false; break; } managedIdx[i] = -1; } else { managedIdx[i] = archetype.getManagedTypeIndex(tid); if (managedIdx[i] < 0) { ok=false; break; } compIdx[i] = -1; } }\n");
             w.write("    return ok ? new ArchetypePlan(compIdx, managedIdx) : null;\n");
             w.write("  }\n");
-
-            // runQuery
             w.write("  @Override public void runQuery(){ if (MODE_PARALLEL) runParallel(); else runSequential(); }\n");
 
             // Sequential execution
@@ -299,16 +359,15 @@ public class QueryProcessor extends AbstractProcessor {
             w.write("    for (com.ethnicthv.ecs.core.archetype.Archetype archetype : world.getAllArchetypes()) {\n");
             w.write("      com.ethnicthv.ecs.core.archetype.ComponentMask am = archetype.getMask(); if (!am.containsAll(withMask)) continue; if (!am.containsNone(withoutMask)) continue; if (anyIds.length > 0 && !am.intersects(anyMask)) continue;\n");
             w.write("      ArchetypePlan plan = PLAN_CACHE.computeIfAbsent(archetype, this::buildPlan); if (plan == null) continue;\n");
-            // Acquire one handle per unmanaged param for entire archetype iteration
             w.write("      final com.ethnicthv.ecs.core.components.ComponentHandle[] pooled = new com.ethnicthv.ecs.core.components.ComponentHandle[PARAM_COUNT];\n");
             w.write("      for (int i = 0; i < PARAM_COUNT; i++) { if (!PARAM_IS_MANAGED[i]) pooled[i] = cm.acquireHandle(); }\n");
             w.write("      final Object[] typed = SEQ_TYPED;\n");
             w.write("      try {\n");
             w.write("        archetype.forEach((entityId, location, chunk) -> {\n");
             w.write("          try {\n");
-            // Rebind pooled handles per-entity
+            // Set @Id field if present
+            w.write("            if (HAS_ID_FIELD) { try { ID_FIELD.setInt(system, entityId); } catch (Throwable t) { throw new RuntimeException(t); } }\n");
             w.write("            for (int k = 0; k < PARAM_COUNT; k++) { if (STRATEGY[k] != ParamStrategy.MANAGED) { var seg = chunk.getComponentData(plan.compIdx[k], location.indexInChunk); pooled[k].reset(seg, PARAM_DESCRIPTORS[k]); } }\n");
-            // Insert binder calls for typed unmanaged
             StringBuilder bindsSeq = new StringBuilder();
             for (int i = 0; i < paramDeclaredTypes.size(); i++) {
                 String decl = paramDeclaredTypes.get(i);
@@ -321,7 +380,6 @@ public class QueryProcessor extends AbstractProcessor {
                 bindsSeq.append("            }\n");
             }
             w.write(bindsSeq.toString());
-            // Prepare per-param locals
             StringBuilder prepArgsSeq = new StringBuilder();
             for (int i = 0; i < paramDeclaredTypes.size(); i++) {
                 String dt = paramDeclaredTypes.get(i);
@@ -331,15 +389,35 @@ public class QueryProcessor extends AbstractProcessor {
                 prepArgsSeq.append("            final ").append(dt).append(" a").append(i).append(" = (").append(dt).append(") __argObj_").append(i).append(";\n");
             }
             w.write(prepArgsSeq.toString());
-            // Call
+            // Build direct call with proper parameter ordering (including @Id)
             StringBuilder callSeq = new StringBuilder();
             if (isPrivate) {
                 callSeq.append("            try { invExact.invokeExact(system");
-                for (int i = 0; i < paramDeclaredTypes.size(); i++) callSeq.append(", a").append(i);
+                for (int i = 0; i < methodParams.size(); i++) {
+                    String t = methodParams.get(i).asType().toString();
+                    if (i == idParamIndex) {
+                        // @Id param: entityId as int or boxed
+                        if ("int".equals(t)) callSeq.append(", entityId");
+                        else callSeq.append(", java.lang.Integer.valueOf(entityId)");
+                    } else {
+                        // find logical index that maps to this physical index
+                        int li = -1; for (int k = 0; k < logicalToPhysical.size(); k++) { if (logicalToPhysical.get(k) == i) { li = k; break; } }
+                        callSeq.append(", a").append(li);
+                    }
+                }
                 callSeq.append("); } catch (Throwable t) { throw new RuntimeException(t); }\n");
             } else {
                 callSeq.append("            system.").append(methodName).append("(");
-                for (int i = 0; i < paramDeclaredTypes.size(); i++) { if (i>0) callSeq.append(", "); callSeq.append("a").append(i); }
+                for (int i = 0; i < methodParams.size(); i++) {
+                    if (i > 0) callSeq.append(", ");
+                    String t = methodParams.get(i).asType().toString();
+                    if (i == idParamIndex) {
+                        if ("int".equals(t)) callSeq.append("entityId"); else callSeq.append("java.lang.Integer.valueOf(entityId)");
+                    } else {
+                        int li = -1; for (int k = 0; k < logicalToPhysical.size(); k++) { if (logicalToPhysical.get(k) == i) { li = k; break; } }
+                        callSeq.append("a").append(li);
+                    }
+                }
                 callSeq.append(");\n");
             }
             w.write(callSeq.toString());
@@ -348,7 +426,6 @@ public class QueryProcessor extends AbstractProcessor {
             w.write("      } finally { for (int i = 0; i < PARAM_COUNT; i++) { if (pooled[i] != null) cm.releaseHandle(pooled[i]); } }\n");
             w.write("    }\n");
             w.write("  }\n");
-
             // Parallel execution
             w.write("  private void runParallel(){\n");
             w.write("    final var cm = world.getComponentManager();\n");
@@ -357,15 +434,11 @@ public class QueryProcessor extends AbstractProcessor {
             w.write("      final ArchetypePlan plan = PLAN_CACHE.computeIfAbsent(archetype, this::buildPlan); if (plan == null) continue;\n");
             w.write("      final com.ethnicthv.ecs.core.archetype.ArchetypeChunk[] chunks = archetype.getChunksSnapshot(); final int count = archetype.chunkCount();\n");
             w.write("      java.util.Arrays.stream(chunks, 0, count).parallel().forEach(chunk -> {\n");
-            // Acquire handles per chunk
             w.write("        final com.ethnicthv.ecs.core.components.ComponentHandle[] pooled = new com.ethnicthv.ecs.core.components.ComponentHandle[PARAM_COUNT]; for (int i = 0; i < PARAM_COUNT; i++) { if (!PARAM_IS_MANAGED[i]) pooled[i] = cm.acquireHandle(); }\n");
-            // Thread-local typed reuse
             w.write("        final Object[] typed = PAR_TYPED.get();\n");
             w.write("        try {\n");
             w.write("          int idx = chunk.nextOccupiedIndex(0); while (idx >= 0) { int eid = chunk.getEntityId(idx);\n");
-            // Rebind handles per entity
             w.write("            for (int k = 0; k < PARAM_COUNT; k++) { if (STRATEGY[k] != ParamStrategy.MANAGED) { var seg = chunk.getComponentData(plan.compIdx[k], idx); pooled[k].reset(seg, PARAM_DESCRIPTORS[k]); } }\n");
-            // Insert binder calls for typed unmanaged
             StringBuilder bindsPar = new StringBuilder();
             for (int i = 0; i < paramDeclaredTypes.size(); i++) {
                 String decl = paramDeclaredTypes.get(i);
@@ -378,7 +451,6 @@ public class QueryProcessor extends AbstractProcessor {
                 bindsPar.append("            }\n");
             }
             w.write(bindsPar.toString());
-            // Prepare per-param locals
             StringBuilder prepArgsPar = new StringBuilder();
             for (int i = 0; i < paramDeclaredTypes.size(); i++) {
                 String dt = paramDeclaredTypes.get(i);
@@ -388,32 +460,44 @@ public class QueryProcessor extends AbstractProcessor {
                 prepArgsPar.append("            final ").append(dt).append(" a").append(i).append(" = (").append(dt).append(") __argObj_").append(i).append(";\n");
             }
             w.write(prepArgsPar.toString());
-            // Call
+            // Build direct call for parallel path (use eid for entity id)
+            StringBuilder callPar = new StringBuilder();
             if (isPrivate) {
-                StringBuilder callPar = new StringBuilder();
                 callPar.append("            try { invExact.invokeExact(system");
-                for (int i = 0; i < paramDeclaredTypes.size(); i++) callPar.append(", a").append(i);
+                for (int i = 0; i < methodParams.size(); i++) {
+                    String t = methodParams.get(i).asType().toString();
+                    if (i == idParamIndex) {
+                        if ("int".equals(t)) callPar.append(", eid"); else callPar.append(", java.lang.Integer.valueOf(eid)");
+                    } else {
+                        int li = -1; for (int k = 0; k < logicalToPhysical.size(); k++) { if (logicalToPhysical.get(k) == i) { li = k; break; } }
+                        callPar.append(", a").append(li);
+                    }
+                }
                 callPar.append("); } catch (Throwable t) { throw new RuntimeException(t); }\n");
-                w.write(callPar.toString());
             } else {
-                StringBuilder callPar = new StringBuilder();
                 callPar.append("            system.").append(methodName).append("(");
-                for (int i = 0; i < paramDeclaredTypes.size(); i++) { if (i>0) callPar.append(", "); callPar.append("a").append(i); }
+                for (int i = 0; i < methodParams.size(); i++) {
+                    if (i > 0) callPar.append(", ");
+                    String t = methodParams.get(i).asType().toString();
+                    if (i == idParamIndex) {
+                        if ("int".equals(t)) callPar.append("eid"); else callPar.append("java.lang.Integer.valueOf(eid)");
+                    } else {
+                        int li = -1; for (int k = 0; k < logicalToPhysical.size(); k++) { if (logicalToPhysical.get(k) == i) { li = k; break; } }
+                        callPar.append("a").append(li);
+                    }
+                }
                 callPar.append(");\n");
-                w.write(callPar.toString());
             }
+            w.write(callPar.toString());
             w.write("            idx = chunk.nextOccupiedIndex(idx + 1); }\n");
             w.write("        } finally { for (int i = 0; i < PARAM_COUNT; i++) { if (pooled[i] != null) cm.releaseHandle(pooled[i]); } }\n");
             w.write("      });\n");
             w.write("    }\n");
             w.write("  }\n");
-
-            // Close class
             w.write("}\n");
         }
     }
 
-    // Find a public binder method (__bind, bind, or reset) that accepts ComponentHandle
     private String findPublicBinderMethodName(TypeElement typeEl) {
         for (Element e : typeEl.getEnclosedElements()) {
             if (e.getKind() == ElementKind.METHOD) {

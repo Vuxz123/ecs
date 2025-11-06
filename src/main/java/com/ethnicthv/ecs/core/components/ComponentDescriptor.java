@@ -16,9 +16,19 @@ public class ComponentDescriptor {
     private final Component.LayoutType layoutType;
     // New: whether this component is managed (@Component.Managed) or unmanaged (default/@Unmanaged)
     private final boolean managed;
+    // New: fine-grained kind distinguishing instance/shared and managed/unmanaged
+    public enum ComponentKind { INSTANCE_UNMANAGED, INSTANCE_MANAGED, SHARED_UNMANAGED, SHARED_MANAGED }
+    private final ComponentKind kind;
 
     public ComponentDescriptor(Class<?> componentClass, long totalSize,
                               List<FieldDescriptor> fields, Component.LayoutType layoutType) {
+        this(componentClass, totalSize, fields, layoutType, null);
+    }
+
+    // Overload that allows explicit kind; if null, derives from managed flag
+    public ComponentDescriptor(Class<?> componentClass, long totalSize,
+                               List<FieldDescriptor> fields, Component.LayoutType layoutType,
+                               ComponentKind explicitKind) {
         this.componentClass = componentClass;
         this.totalSize = totalSize;
         this.fieldList = Collections.unmodifiableList(new ArrayList<>(fields));
@@ -37,6 +47,8 @@ public class ComponentDescriptor {
         this.layoutType = layoutType;
         // Determine managed kind from annotation on the component type
         this.managed = componentClass.isAnnotationPresent(Component.Managed.class);
+        // Determine kind: prefer explicit, else derive from managed flag as instance component
+        this.kind = (explicitKind != null) ? explicitKind : (this.managed ? ComponentKind.INSTANCE_MANAGED : ComponentKind.INSTANCE_UNMANAGED);
     }
 
     public Class<?> getComponentClass() {
@@ -76,6 +88,9 @@ public class ComponentDescriptor {
 
     // New: managed flag
     public boolean isManaged() { return managed; }
+
+    // New: fine-grained kind
+    public ComponentKind getKind() { return kind; }
 
     /**
      * Field descriptor with type and layout information
@@ -138,6 +153,7 @@ public class ComponentDescriptor {
           .append(", size=").append(totalSize)
           .append(", layout=").append(layoutType)
           .append(", managed=").append(managed)
+          .append(", kind=").append(kind)
           .append(", fields=[\n");
         for (FieldDescriptor field : fieldList) {
             sb.append("  ").append(field.name())

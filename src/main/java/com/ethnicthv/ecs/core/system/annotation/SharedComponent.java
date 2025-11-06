@@ -5,8 +5,11 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
+/**
+ * Class dùng annotation này phải implement equals() và hashCode().
+ */
 @Retention(RetentionPolicy.RUNTIME)
-@Target(ElementType.PARAMETER)
-public @interface Component {
-    Class<?> type();
+@Target(ElementType.TYPE)
+public @interface SharedComponent {
 }
+

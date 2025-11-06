@@ -60,5 +60,11 @@ public interface Component {
     @Retention(RetentionPolicy.RUNTIME)
     @Target(ElementType.TYPE)
     @interface Managed {}
+
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.TYPE)
+    @interface Shared{
+
+    }
 }
 

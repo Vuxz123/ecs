@@ -35,10 +35,13 @@ public final class ArchetypeManager {
     public Archetype getOrCreateArchetype(ComponentMask mask) {
         return archetypes.computeIfAbsent(mask, m -> {
             int[] allTypeIds = m.toComponentIdArray();
-            // Split into unmanaged and managed
-            List<ComponentDescriptor> unmanagedDescs = new ArrayList<>();
-            List<Integer> unmanagedIds = new ArrayList<>();
-            List<Integer> managedIds = new ArrayList<>();
+
+            List<ComponentDescriptor> unmanagedInstanceDescs = new ArrayList<>();
+            List<Integer> unmanagedInstanceIds = new ArrayList<>();
+            List<Integer> managedInstanceIds = new ArrayList<>();
+            List<Integer> unmanagedSharedIds = new ArrayList<>();
+            List<Integer> managedSharedIds = new ArrayList<>();
+
             for (int typeId : allTypeIds) {
                 var meta = metadataProvider.apply(typeId);
                 if (meta == null) {
@@ -48,20 +51,27 @@ public final class ArchetypeManager {
                 if (desc == null) {
                     throw new IllegalStateException("Descriptor missing for component " + meta.type().getName());
                 }
-                if (desc.isManaged()) {
-                    managedIds.add(typeId);
-                } else {
-                    unmanagedIds.add(typeId);
-                    unmanagedDescs.add(desc);
+                ComponentDescriptor.ComponentKind kind = desc.getKind();
+                switch (kind) {
+                    case INSTANCE_UNMANAGED -> {
+                        unmanagedInstanceIds.add(typeId);
+                        unmanagedInstanceDescs.add(desc);
+                    }
+                    case INSTANCE_MANAGED -> managedInstanceIds.add(typeId);
+                    case SHARED_UNMANAGED -> unmanagedSharedIds.add(typeId);
+                    case SHARED_MANAGED -> managedSharedIds.add(typeId);
                 }
             }
-            ComponentDescriptor[] unmanagedArray = unmanagedDescs.toArray(new ComponentDescriptor[0]);
-            int[] unmanagedIdsArray = unmanagedIds.stream().mapToInt(Integer::intValue).toArray();
-            int[] managedIdsArray = managedIds.stream().mapToInt(Integer::intValue).toArray();
 
-            Archetype archetype = new Archetype(m, allTypeIds, unmanagedArray, managedIdsArray, arena);
-            // Provide the mapping for unmanaged type ids order used in this archetype
-            archetype.setUnmanagedTypeIds(unmanagedIdsArray);
+            ComponentDescriptor[] unmanagedInstanceArray = unmanagedInstanceDescs.toArray(new ComponentDescriptor[0]);
+            int[] managedInstanceIdsArray = managedInstanceIds.stream().mapToInt(Integer::intValue).toArray();
+            int[] unmanagedSharedIdsArray = unmanagedSharedIds.stream().mapToInt(Integer::intValue).toArray();
+            int[] managedSharedIdsArray = managedSharedIds.stream().mapToInt(Integer::intValue).toArray();
+
+            Archetype archetype = new Archetype(m, allTypeIds, unmanagedInstanceArray, managedInstanceIdsArray, unmanagedSharedIdsArray, managedSharedIdsArray, arena);
+            // Provide the mapping for unmanaged instance type ids order used in this archetype
+            int[] unmanagedInstanceIdsArray = unmanagedInstanceIds.stream().mapToInt(Integer::intValue).toArray();
+            archetype.setUnmanagedTypeIds(unmanagedInstanceIdsArray);
             return archetype;
         });
     }

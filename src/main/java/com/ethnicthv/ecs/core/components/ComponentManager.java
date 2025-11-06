@@ -3,6 +3,7 @@ package com.ethnicthv.ecs.core.components;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -32,6 +33,9 @@ public class ComponentManager {
                 componentClass.getName() + " must implement Component interface");
         }
 
+        // Lightweight validation for shared component annotations
+        validateSharedAnnotations(componentClass);
+
         // Assign a stable type id exactly once, even under races
         int typeId = componentTypeIds.computeIfAbsent(componentClass, k -> nextTypeId.getAndIncrement());
 
@@ -52,6 +56,9 @@ public class ComponentManager {
         if (!Component.class.isAssignableFrom(componentClass)) {
             throw new IllegalArgumentException(componentClass.getName() + " must implement Component interface");
         }
+        // Validate shared annotations even if descriptor is provided
+        validateSharedAnnotations(componentClass);
+
         int typeId = componentTypeIds.computeIfAbsent(componentClass, k -> nextTypeId.getAndIncrement());
         if (descriptor == null) {
             throw new IllegalArgumentException("descriptor must not be null for " + componentClass.getName());
@@ -265,6 +272,9 @@ public class ComponentManager {
      * Build component descriptor through reflection
      */
     private ComponentDescriptor buildDescriptor(Class<?> componentClass) {
+        // Determine kind from annotations
+        ComponentDescriptor.ComponentKind kind = getComponentKind(componentClass);
+
         // Get layout annotation
         Component.Layout layoutAnnotation = componentClass.getAnnotation(Component.Layout.class);
         Component.LayoutType layoutType = layoutAnnotation != null ?
@@ -342,7 +352,19 @@ public class ComponentManager {
             totalSize = currentOffset;
         }
 
-        return new ComponentDescriptor(componentClass, totalSize, fieldDescriptors, layoutType);
+        return new ComponentDescriptor(componentClass, totalSize, fieldDescriptors, layoutType, kind);
+    }
+
+    private static ComponentDescriptor.ComponentKind getComponentKind(Class<?> componentClass) {
+        boolean isManaged = componentClass.isAnnotationPresent(Component.Managed.class);
+        boolean isShared = componentClass.isAnnotationPresent(Component.Shared.class);
+        ComponentDescriptor.ComponentKind kind;
+        if (isShared) {
+            kind = isManaged ? ComponentDescriptor.ComponentKind.SHARED_MANAGED : ComponentDescriptor.ComponentKind.SHARED_UNMANAGED;
+        } else {
+            kind = isManaged ? ComponentDescriptor.ComponentKind.INSTANCE_MANAGED : ComponentDescriptor.ComponentKind.INSTANCE_UNMANAGED;
+        }
+        return kind;
     }
 
     /**
@@ -384,5 +406,67 @@ public class ComponentManager {
             // not generated/present
         }
         return null;
+    }
+
+    /**
+     * Lightweight validation for shared component annotations.
+     * - @SharedComponent must be a class that overrides equals(Object) and hashCode().
+     * - @UnmanagedSharedComponent must be an interface whose declared methods are only getters (0-arg, returns int/long)
+     *   or setters (1-arg int/long, returns void).
+     */
+    private void validateSharedAnnotations(Class<?> cls) {
+        boolean hasShared = cls.isAnnotationPresent(Component.Shared.class);
+        boolean hasManaged = cls.isAnnotationPresent(Component.Managed.class);
+
+        if (hasShared) {
+            if (cls.isInterface()) {
+                throw new IllegalArgumentException("@SharedComponent must be placed on a class, not an interface: " + cls.getName());
+            }
+            // Must override equals(Object) and hashCode() (possibly via a superclass, but not from Object)
+            try {
+                Method eq = cls.getMethod("equals", Object.class);
+                if (eq.getDeclaringClass() == Object.class) {
+                    throw new NoSuchMethodException();
+                }
+            } catch (NoSuchMethodException e) {
+                throw new IllegalArgumentException("Class " + cls.getName() + " is annotated @SharedComponent but does not override equals(Object)");
+            }
+            try {
+                Method hc = cls.getMethod("hashCode");
+                if (hc.getDeclaringClass() == Object.class) {
+                    throw new NoSuchMethodException();
+                }
+            } catch (NoSuchMethodException e) {
+                throw new IllegalArgumentException("Class " + cls.getName() + " is annotated @SharedComponent but does not override hashCode()");
+            }
+        }
+
+        if (hasShared && hasManaged) {
+            if (!cls.isInterface()) {
+                throw new IllegalArgumentException("@UnmanagedSharedComponent must be placed on an interface: " + cls.getName());
+            }
+            Method[] declared = cls.getDeclaredMethods();
+            if (declared.length == 0) {
+                throw new IllegalArgumentException("@UnmanagedSharedComponent interface must declare at least one getter/setter method: " + cls.getName());
+            }
+            for (Method m : declared) {
+                int paramCount = m.getParameterCount();
+                Class<?> ret = m.getReturnType();
+                if (paramCount == 0) {
+                    // getter: returns int or long (primitive)
+                    if (!(ret == int.class || ret == long.class)) {
+                        throw new IllegalArgumentException("Getter method '" + m.getName() + "' in @UnmanagedSharedComponent must return int or long: " + cls.getName());
+                    }
+                } else if (paramCount == 1) {
+                    // setter: one int/long param, returns void
+                    Class<?> p0 = m.getParameterTypes()[0];
+                    if (!((p0 == int.class || p0 == long.class) && ret == void.class)) {
+                        throw new IllegalArgumentException("Setter method '" + m.getName() + "' in @UnmanagedSharedComponent must accept (int|long) and return void: " + cls.getName());
+                    }
+                } else {
+                    throw new IllegalArgumentException("Method '" + m.getName() + "' in @UnmanagedSharedComponent must be a getter or setter for a single int/long: " + cls.getName());
+                }
+            }
+        }
     }
 }

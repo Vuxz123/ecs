@@ -6,6 +6,7 @@ import com.ethnicthv.ecs.core.components.ComponentHandle;
 import com.ethnicthv.ecs.core.components.ComponentManager;
 import com.ethnicthv.ecs.core.system.ExecutionMode;
 import com.ethnicthv.ecs.core.system.annotation.Component;
+import com.ethnicthv.ecs.core.system.annotation.Id;
 import com.ethnicthv.ecs.core.system.annotation.Query;
 import com.ethnicthv.ecs.core.system.SystemManager;
 
@@ -107,6 +108,8 @@ public class SystemAPIDemo {
         // This query will execute in PARALLEL automatically!
         public IQuery movingEntities;
 
+        private int firstEntityId = Integer.MAX_VALUE;
+
         void update() {
             // New API: single entrypoint
             movingEntities.runQuery();
@@ -118,11 +121,13 @@ public class SystemAPIDemo {
                 with = HealthComponent.class
         )
         private void query(
-                @Component(type = VelocityComponent.class) ComponentHandle velocityHandle,
+                @Id Integer entityId,
+                @Component(type = VelocityComponent.class) VelocityComponentHandle velocityHandle,
                 @Component(type = PositionComponent.class) ComponentHandle locationHandle
         ) {
-            float vx = VelocityComponentAccess.getVx(velocityHandle);
-            float vy = VelocityComponentAccess.getVy(velocityHandle);
+
+            float vx = velocityHandle.getVx();
+            float vy = velocityHandle.getVy();
 
             float x = PositionComponentAccess.getX(locationHandle);
             float y = PositionComponentAccess.getY(locationHandle);
@@ -133,6 +138,17 @@ public class SystemAPIDemo {
             // Write back
             PositionComponentAccess.setX(locationHandle, x);
             PositionComponentAccess.setY(locationHandle, y);
+
+            if (firstEntityId == Integer.MAX_VALUE) {
+                System.out.println("Logging movement of first entity only for demo purposes...");
+                firstEntityId = entityId;
+            }
+            else if (entityId != firstEntityId) {
+                return;
+            }
+
+            System.out.println("Moved Entity " + entityId + " to (" + x + ", " + y + ")");
+            System.out.println("First Entity ID: " + firstEntityId);
         }
     }
 
@@ -190,7 +206,7 @@ public class SystemAPIDemo {
             PositionComponentAccess.setY(positionHandle, y);
 
             // log name from managed component
-            System.out.println("Entity Name: " + nameComponent.name);
+            //System.out.println("Entity Name: " + nameComponent.name);
         }
     }
 }

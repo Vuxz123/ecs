@@ -22,7 +22,7 @@ import java.util.stream.Collectors;
  */
 @SupportedAnnotationTypes({
         "com.ethnicthv.ecs.core.components.Component.Field",
-        "com.ethnicthv.ecs.core.components.Component.Layout"
+        "com.ethnicthv.ecs.core.components.Component.Layout",
 })
 @SupportedSourceVersion(SourceVersion.RELEASE_25)
 public class ComponentProcessor extends AbstractProcessor {
@@ -160,6 +160,8 @@ public class ComponentProcessor extends AbstractProcessor {
         generateMetaSource(fqnMeta, pkg, metaName, compType, genFields, totalSize, layout);
         // Generate Access class
         generateAccessSource(fqnAccess, pkg, accessName, simpleName, genFields);
+        // New: Always generate a typed Handle when @Layout present
+        generateHandleSource(pkg, simpleName, genFields);
     }
 
     private void generateMetaSource(String fqn, String pkg, String metaName, TypeElement compType,
@@ -239,8 +241,7 @@ public class ComponentProcessor extends AbstractProcessor {
             w.write("    public static void setChar(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, char v) { h.setChar(fieldIndex, v); }\n\n");
 
             // Per-field named getters/setters
-            for (int i = 0; i < genFields.size(); i++) {
-                GeneratedField f = genFields.get(i);
+            for (GeneratedField f : genFields) {
                 String methodSuffix = toCamelCase(f.name);
                 String idxConst = "IDX_" + f.name.toUpperCase(Locale.ROOT);
                 switch (f.ft) {
@@ -283,20 +284,57 @@ public class ComponentProcessor extends AbstractProcessor {
         }
     }
 
-    private String toCamelCase(String name) {
-        StringBuilder sb = new StringBuilder();
-        boolean upperNext = true;
-        for (char c : name.toCharArray()) {
-            if (c == '_' || c == '-') {
-                upperNext = true;
-            } else if (upperNext) {
-                sb.append(Character.toUpperCase(c));
-                upperNext = false;
-            } else {
-                sb.append(c);
+    private void generateHandleSource(String pkg, String simpleName, List<GeneratedField> genFields) throws IOException {
+        String handleName = simpleName + "Handle";
+        String fqn = pkg.isEmpty() ? handleName : pkg + "." + handleName;
+        JavaFileObject file = processingEnv.getFiler().createSourceFile(fqn);
+        try (Writer w = file.openWriter()) {
+            if (!pkg.isEmpty()) w.write("package " + pkg + ";\n\n");
+            w.write("@SuppressWarnings(\"all\")\n");
+            w.write("public final class " + handleName + " {\n");
+            w.write("  private com.ethnicthv.ecs.core.components.ComponentHandle __internalHandle;\n");
+            w.write("  public void __bind(com.ethnicthv.ecs.core.components.ComponentHandle h) { this.__internalHandle = h; }\n\n");
+            String meta = simpleName + "Meta";
+            for (GeneratedField f : genFields) {
+                String prop = toCamelCase(f.name);
+                String idxConst = meta + ".IDX_" + f.name.toUpperCase(Locale.ROOT);
+                switch (f.ft) {
+                    case FLOAT -> {
+                        w.write("  public float get" + prop + "() { return __internalHandle.getFloat(" + idxConst + "); }\n");
+                        w.write("  public void set" + prop + "(float v) { __internalHandle.setFloat(" + idxConst + ", v); }\n");
+                    }
+                    case INT -> {
+                        w.write("  public int get" + prop + "() { return __internalHandle.getInt(" + idxConst + "); }\n");
+                        w.write("  public void set" + prop + "(int v) { __internalHandle.setInt(" + idxConst + ", v); }\n");
+                    }
+                    case LONG -> {
+                        w.write("  public long get" + prop + "() { return __internalHandle.getLong(" + idxConst + "); }\n");
+                        w.write("  public void set" + prop + "(long v) { __internalHandle.setLong(" + idxConst + ", v); }\n");
+                    }
+                    case DOUBLE -> {
+                        w.write("  public double get" + prop + "() { return __internalHandle.getDouble(" + idxConst + "); }\n");
+                        w.write("  public void set" + prop + "(double v) { __internalHandle.setDouble(" + idxConst + ", v); }\n");
+                    }
+                    case BOOLEAN -> {
+                        w.write("  public boolean is" + prop + "() { return __internalHandle.getBoolean(" + idxConst + "); }\n");
+                        w.write("  public void set" + prop + "(boolean v) { __internalHandle.setBoolean(" + idxConst + ", v); }\n");
+                    }
+                    case BYTE -> {
+                        w.write("  public byte get" + prop + "() { return __internalHandle.getByte(" + idxConst + "); }\n");
+                        w.write("  public void set" + prop + "(byte v) { __internalHandle.setByte(" + idxConst + ", v); }\n");
+                    }
+                    case SHORT -> {
+                        w.write("  public short get" + prop + "() { return __internalHandle.getShort(" + idxConst + "); }\n");
+                        w.write("  public void set" + prop + "(short v) { __internalHandle.setShort(" + idxConst + ", v); }\n");
+                    }
+                    case CHAR -> {
+                        w.write("  public char get" + prop + "() { return __internalHandle.getChar(" + idxConst + "); }\n");
+                        w.write("  public void set" + prop + "(char v) { __internalHandle.setChar(" + idxConst + ", v); }\n");
+                    }
+                }
             }
+            w.write("}\n");
         }
-        return sb.toString();
     }
 
     private void generateCentralRegistry() throws IOException {
@@ -393,6 +431,22 @@ public class ComponentProcessor extends AbstractProcessor {
         };
     }
 
+    private String toCamelCase(String name) {
+        StringBuilder sb = new StringBuilder();
+        boolean upperNext = true;
+        for (char c : name.toCharArray()) {
+            if (c == '_' || c == '-') {
+                upperNext = true;
+            } else if (upperNext) {
+                sb.append(Character.toUpperCase(c));
+                upperNext = false;
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
     private record ComponentLayout(LayoutType type, long sizeOverride) {}
     private enum LayoutType { SEQUENTIAL, PADDING, EXPLICIT }
     private record FieldAttrs(int size, int offset, int alignment) {}
@@ -400,10 +454,10 @@ public class ComponentProcessor extends AbstractProcessor {
         final String name; final FieldType ft; final long offset; final long size; final int alignment;
         GeneratedField(String n, FieldType ft, long off, long sz, int a) { this.name=n; this.ft=ft; this.offset=off; this.size=sz; this.alignment=a; }
     }
+
     private enum FieldType {
-        BYTE("BYTE",1,1), SHORT("SHORT",2,2), INT("INT",4,4), LONG("LONG",8,8), FLOAT("FLOAT",4,4), DOUBLE("DOUBLE",8,8), BOOLEAN("BOOLEAN",1,1), CHAR("CHAR",2,2);
-        final String enumName; final long size; final int naturalAlignment;
-        FieldType(String n, long s, int a) { this.enumName=n; this.size=s; this.naturalAlignment=a; }
+        BYTE(1,1,"BYTE"), SHORT(2,2,"SHORT"), INT(4,4,"INT"), LONG(8,8,"LONG"), FLOAT(4,4,"FLOAT"), DOUBLE(8,8,"DOUBLE"), BOOLEAN(1,1,"BOOLEAN"), CHAR(2,2,"CHAR");
+        final long size; final int naturalAlignment; final String enumName;
+        FieldType(long sz, int na, String en) { this.size=sz; this.naturalAlignment=na; this.enumName=en; }
     }
 }
-

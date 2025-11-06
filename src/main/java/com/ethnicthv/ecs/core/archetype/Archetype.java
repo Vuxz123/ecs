@@ -9,10 +9,6 @@ import java.lang.foreign.MemorySegment;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Archetype groups entities that share the same set of components.
@@ -27,33 +23,23 @@ public final class Archetype implements IArchetype {
     private final ComponentMask mask; // cached mask
     private final Arena arena; // arena for new chunk allocations
 
-    // Optional: full component ids including managed (only set by managed-aware ctor)
     private final int[] allComponentTypeIds;
-    // Managed component state (only used when managed types are present)
     private final int[] managedTypeIds;
     private final ConcurrentHashMap<Integer, Integer> managedIndexMap = new ConcurrentHashMap<>();
 
-    // Cache-friendly chunk storage
-    private volatile ArchetypeChunk[] chunks;
-    private final AtomicInteger chunkCount = new AtomicInteger(0); // also acts as publish barrier
-    private final ReentrantLock resizeLock = new ReentrantLock();
-
-    // Queue of chunk indices that currently have at least one free slot
-    private final ConcurrentLinkedQueue<Integer> availableChunks = new ConcurrentLinkedQueue<>();
-    // Approximate count of available chunks in the queue (kept exact via ticket discipline)
-    private final AtomicInteger availableCount = new AtomicInteger(0);
-
-    // Lock-free provisioning control: at most one provisioner at a time
-    private final AtomicBoolean provisioning = new AtomicBoolean(false);
-    private static final int PROVISION_THRESHOLD = 2; // when below, proactively create one more chunk
-    // Spin attempts to bridge provisioning without blocking. Tuned to balance latency and CPU burn.
-    private static final int SPIN_WAIT_ITERATIONS = 32;
-
-    // Choose a chunk byte budget (tunable)
-    private static final int CHUNK_SIZE = 16 * 1024;
-    private static final int DEFAULT_ENTITIES_PER_CHUNK = 64; // when descriptors report 0 size
-
     private final ConcurrentHashMap<Integer, Integer> componentIndexMap = new ConcurrentHashMap<>();
+
+    // New: per-shared-value grouping of chunks
+    private final ConcurrentHashMap<SharedValueKey, ChunkGroup> chunkGroups = new ConcurrentHashMap<>();
+    // New: shared component type ids (unmanaged and managed) and their index maps
+    private final int[] sharedManagedTypeIds;
+    private final int[] sharedUnmanagedTypeIds;
+    private final ConcurrentHashMap<Integer, Integer> sharedManagedIndexMap = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Integer, Integer> sharedUnmanagedIndexMap = new ConcurrentHashMap<>();
+
+    // constants preserved
+    private static final int CHUNK_SIZE = 16 * 1024;
+    private static final int DEFAULT_ENTITIES_PER_CHUNK = 64;
 
     public Archetype(ComponentMask mask, int[] componentIds, ComponentDescriptor[] descriptors, Arena arena) {
         if (componentIds.length != descriptors.length) {
@@ -62,10 +48,12 @@ public final class Archetype implements IArchetype {
         this.componentIds = componentIds;
         this.descriptors = descriptors;
         this.componentElementSizes = new long[descriptors.length];
-        this.mask = mask; // store provided mask
+        this.mask = mask;
         this.arena = arena;
-        this.allComponentTypeIds = null; // unmanaged-only ctor
+        this.allComponentTypeIds = null;
         this.managedTypeIds = new int[0];
+        this.sharedManagedTypeIds = new int[0];
+        this.sharedUnmanagedTypeIds = new int[0];
 
         long totalPerEntity = 0;
         for (int i = 0; i < descriptors.length; i++) {
@@ -73,36 +61,26 @@ public final class Archetype implements IArchetype {
             componentElementSizes[i] = s;
             totalPerEntity += s;
         }
-
         if (totalPerEntity <= 0) {
             this.entitiesPerChunk = DEFAULT_ENTITIES_PER_CHUNK;
         } else {
             this.entitiesPerChunk = Math.max(1, (int) (CHUNK_SIZE / totalPerEntity));
         }
-
-        // init chunk array
-        this.chunks = new ArchetypeChunk[Math.max(4, 1)];
-        // Remove precomputed typeIndex; use computeIfAbsent in indexOfComponentType instead
-        // Create initial chunk at index 0
-        ArchetypeChunk first = new ArchetypeChunk(descriptors, componentElementSizes, entitiesPerChunk, arena);
-        this.chunks[0] = first;
-        chunkCount.set(1);
-        // initial chunk has all slots free; enqueue its index (0) with ticket
-        if (first.tryMarkQueued()) {
-            this.availableChunks.add(0);
-            this.availableCount.incrementAndGet();
-        }
+        // Create default group to preserve previous behavior (one initial chunk)
+        getOrCreateChunkGroup(new SharedValueKey(null, null));
     }
 
-    // Managed-aware constructor: descriptors contain ONLY unmanaged components, managedTypeIds are separate; allComponentTypeIds includes both
+    // Managed-aware constructor: unmanaged descriptors + separate managed type ids
     public Archetype(ComponentMask mask, int[] allComponentTypeIds, ComponentDescriptor[] unmanagedDescriptors, int[] managedTypeIds, Arena arena) {
         this.mask = mask;
         this.allComponentTypeIds = allComponentTypeIds;
         this.managedTypeIds = managedTypeIds != null ? managedTypeIds.clone() : new int[0];
-        this.componentIds = new int[unmanagedDescriptors.length]; // will be populated via setUnmanagedTypeIds
+        this.componentIds = new int[unmanagedDescriptors.length];
         this.descriptors = unmanagedDescriptors;
         this.componentElementSizes = new long[unmanagedDescriptors.length];
         this.arena = arena;
+        this.sharedManagedTypeIds = new int[0];
+        this.sharedUnmanagedTypeIds = new int[0];
 
         long totalPerEntity = 0;
         for (int i = 0; i < unmanagedDescriptors.length; i++) {
@@ -111,15 +89,45 @@ public final class Archetype implements IArchetype {
             totalPerEntity += s;
         }
         this.entitiesPerChunk = (totalPerEntity <= 0) ? DEFAULT_ENTITIES_PER_CHUNK : Math.max(1, (int) (CHUNK_SIZE / totalPerEntity));
+        // Create default group to preserve previous behavior
+        getOrCreateChunkGroup(new SharedValueKey(null, null));
+    }
 
-        this.chunks = new ArchetypeChunk[Math.max(4, 1)];
-        ArchetypeChunk first = new ArchetypeChunk(unmanagedDescriptors, componentElementSizes, entitiesPerChunk, arena, this.managedTypeIds.length);
-        this.chunks[0] = first;
-        chunkCount.set(1);
-        if (first.tryMarkQueued()) {
-            this.availableChunks.add(0);
-            this.availableCount.incrementAndGet();
+    // New: Fully managed/shared aware constructor
+    public Archetype(ComponentMask mask,
+                     int[] allComponentTypeIds,
+                     ComponentDescriptor[] unmanagedInstanceDescriptors,
+                     int[] managedInstanceTypeIds,
+                     int[] unmanagedSharedTypeIds,
+                     int[] managedSharedTypeIds,
+                     Arena arena) {
+        this.mask = mask;
+        this.allComponentTypeIds = allComponentTypeIds;
+        this.managedTypeIds = managedInstanceTypeIds != null ? managedInstanceTypeIds.clone() : new int[0];
+        this.sharedUnmanagedTypeIds = unmanagedSharedTypeIds != null ? unmanagedSharedTypeIds.clone() : new int[0];
+        this.sharedManagedTypeIds = managedSharedTypeIds != null ? managedSharedTypeIds.clone() : new int[0];
+        this.componentIds = new int[unmanagedInstanceDescriptors.length];
+        this.descriptors = unmanagedInstanceDescriptors;
+        this.componentElementSizes = new long[unmanagedInstanceDescriptors.length];
+        this.arena = arena;
+
+        long totalPerEntity = 0;
+        for (int i = 0; i < unmanagedInstanceDescriptors.length; i++) {
+            long s = unmanagedInstanceDescriptors[i].getTotalSize();
+            componentElementSizes[i] = s;
+            totalPerEntity += s;
         }
+        this.entitiesPerChunk = (totalPerEntity <= 0) ? DEFAULT_ENTITIES_PER_CHUNK : Math.max(1, (int) (CHUNK_SIZE / totalPerEntity));
+
+        // Build index maps for shared type ids
+        for (int i = 0; i < this.sharedManagedTypeIds.length; i++) {
+            sharedManagedIndexMap.put(this.sharedManagedTypeIds[i], i);
+        }
+        for (int i = 0; i < this.sharedUnmanagedTypeIds.length; i++) {
+            sharedUnmanagedIndexMap.put(this.sharedUnmanagedTypeIds[i], i);
+        }
+        // Create default group to preserve previous behavior
+        getOrCreateChunkGroup(new SharedValueKey(null, null));
     }
 
     // Internal helper to set unmanaged type ids after construction (used by ArchetypeManager)
@@ -151,11 +159,11 @@ public final class Archetype implements IArchetype {
      */
     @Override
     public List<IArchetypeChunk> getChunks() {
-        ArchetypeChunk[] snap = this.chunks;
-        int count = this.chunkCount.get();
-        List<IArchetypeChunk> list = new ArrayList<>(count);
-        for (int i = 0; i < count; i++) list.add(snap[i]);
-        return list;
+        // Backward compatible: if no shared grouping used, return chunks from a default group if present
+        ChunkGroup defaultGroup = chunkGroups.getOrDefault(new SharedValueKey(null, null), null);
+        if (defaultGroup == null) return List.of();
+        List<ArchetypeChunk> list = defaultGroup.getChunks();
+        return new ArrayList<>(list);
     }
 
     /**
@@ -173,152 +181,40 @@ public final class Archetype implements IArchetype {
      *         {@link #chunkCount()} to determine how many valid entries exist.
      */
     public ArchetypeChunk[] getChunksSnapshot() {
-        return this.chunks;
+        ChunkGroup defaultGroup = chunkGroups.getOrDefault(new SharedValueKey(null, null), null);
+        return defaultGroup != null ? defaultGroup.getChunksSnapshot() : new ArchetypeChunk[0];
     }
 
     public ArchetypeChunk.ChunkLocation addEntity(int entityId) {
-        // Structured, non-recursive allocation loop
-        while (true) {
-            // 1) Try fast-path: consume available chunk(s)
-            ArchetypeChunk.ChunkLocation loc = tryFastPathAllocate(entityId);
-            if (loc != null) return loc;
-
-            // 2) If queue empty, attempt to become the provisioner (lock-free CAS)
-            if (provisioning.compareAndSet(false, true)) {
-                try {
-                    // Double-check fast-path in case capacity was added while acquiring provisioning
-                    loc = tryFastPathAllocate(entityId);
-                    if (loc != null) return loc;
-                    // Create exactly one new chunk and allocate from it
-                    return createChunkAndAllocate(entityId);
-                } finally {
-                    provisioning.set(false);
-                }
-            }
-
-            // 3) Someone else is provisioning. Spin briefly and retry.
-            for (int i = 0; i < SPIN_WAIT_ITERATIONS; i++) {
-                loc = tryFastPathAllocate(entityId);
-                if (loc != null) return loc;
-                Thread.onSpinWait();
-            }
-            // Loop and try again
-        }
-    }
-
-    // Fast-path allocation from availableChunks; returns null if none succeed
-    private ArchetypeChunk.ChunkLocation tryFastPathAllocate(int entityId) {
-        Integer idxChunk;
-        while ((idxChunk = availableChunks.poll()) != null) {
-            availableCount.decrementAndGet();
-            ArchetypeChunk[] snap = this.chunks;
-            int count = this.chunkCount.get();
-            if (idxChunk < 0 || idxChunk >= count) continue;
-            ArchetypeChunk chunk = snap[idxChunk];
-            if (chunk == null) continue;
-            chunk.markDequeued();
-            int slot = chunk.allocateSlot(entityId);
-            if (slot >= 0) {
-                // Opportunistic replenishment when running low
-                maybeProvision();
-                if (chunk.hasFree() && chunk.tryMarkQueued()) {
-                    availableChunks.offer(idxChunk);
-                    availableCount.incrementAndGet();
-                }
-                return new ArchetypeChunk.ChunkLocation(idxChunk, slot);
-            }
-            // If full now, do not requeue; proceed to next
-        }
-        return null;
-    }
-
-    // Create one chunk, append into array, allocate a slot in it, and enqueue if it still has free capacity
-    private ArchetypeChunk.ChunkLocation createChunkAndAllocate(int entityId) {
-        ArchetypeChunk newChunk = new ArchetypeChunk(descriptors, componentElementSizes, entitiesPerChunk, arena, managedTypeIds.length);
-        int newIndex = appendChunk(newChunk);
-        int slot = newChunk.allocateSlot(entityId);
-        if (newChunk.hasFree() && newChunk.tryMarkQueued()) {
-            availableChunks.offer(newIndex);
-            availableCount.incrementAndGet();
-        }
-        return new ArchetypeChunk.ChunkLocation(newIndex, slot);
-    }
-
-    private int appendChunk(ArchetypeChunk newChunk) {
-        resizeLock.lock();
-        try {
-            ArchetypeChunk[] arr = this.chunks;
-            int idx = chunkCount.get();
-            if (idx < arr.length) {
-                arr[idx] = newChunk;
-                // publish via chunkCount volatile increment
-                chunkCount.incrementAndGet();
-                return idx;
-            }
-            // resize: double capacity
-            int newCap = Math.max(4, arr.length << 1);
-            ArchetypeChunk[] newArr = new ArchetypeChunk[newCap];
-            System.arraycopy(arr, 0, newArr, 0, idx);
-            newArr[idx] = newChunk;
-            // publish new array first
-            this.chunks = newArr;
-            // then publish count
-            chunkCount.incrementAndGet();
-            return idx;
-        } finally {
-            resizeLock.unlock();
-        }
-    }
-
-    private void maybeProvision() {
-        if (availableCount.get() < PROVISION_THRESHOLD && provisioning.compareAndSet(false, true)) {
-            try {
-                ArchetypeChunk extra = new ArchetypeChunk(descriptors, componentElementSizes, entitiesPerChunk, arena, managedTypeIds.length);
-                int id = appendChunk(extra);
-                if (extra.tryMarkQueued()) {
-                    availableChunks.offer(id);
-                    availableCount.incrementAndGet();
-                }
-            } finally {
-                provisioning.set(false);
-            }
-        }
+        // Place into default group when no shared key is defined
+        ChunkGroup group = getOrCreateChunkGroup(new SharedValueKey(null, null));
+        return group.addEntity(entityId);
     }
 
     public void removeEntity(ArchetypeChunk.ChunkLocation location) {
-        int idx = location.chunkIndex;
-        ArchetypeChunk[] snap = this.chunks;
-        if (idx < 0 || idx >= chunkCount.get()) return;
-        ArchetypeChunk chunk = snap[idx];
-        if (chunk == null) return;
-        chunk.freeSlot(location.indexInChunk);
-        if (chunk.hasFree() && chunk.tryMarkQueued()) {
-            availableChunks.offer(idx);
-            availableCount.incrementAndGet();
-        }
+        // Assume default group for backward compatibility
+        ChunkGroup defaultGroup = chunkGroups.get(new SharedValueKey(null, null));
+        if (defaultGroup != null) defaultGroup.removeEntity(location);
     }
 
     public ArchetypeChunk getChunk(int chunkIndex) {
-        ArchetypeChunk[] snap = this.chunks;
-        int count = this.chunkCount.get();
-        if (chunkIndex < 0 || chunkIndex >= count) throw new IndexOutOfBoundsException();
-        return snap[chunkIndex];
+        ChunkGroup defaultGroup = chunkGroups.get(new SharedValueKey(null, null));
+        if (defaultGroup == null) throw new IndexOutOfBoundsException();
+        return defaultGroup.getChunk(chunkIndex);
     }
 
-    public int chunkCount() { return this.chunkCount.get(); }
+    public int chunkCount() {
+        ChunkGroup defaultGroup = chunkGroups.get(new SharedValueKey(null, null));
+        return defaultGroup != null ? defaultGroup.chunkCount() : 0;
+    }
 
     @Override
-    public int getChunkCount() {
-        return chunkCount();
-    }
+    public int getChunkCount() { return chunkCount(); }
 
     @Override
     public int getEntityCount() {
-        ArchetypeChunk[] snap = this.chunks;
-        int count = this.chunkCount.get();
-        int total = 0;
-        for (int i = 0; i < count; i++) total += snap[i].size();
-        return total;
+        ChunkGroup defaultGroup = chunkGroups.get(new SharedValueKey(null, null));
+        return defaultGroup != null ? defaultGroup.getEntityCount() : 0;
     }
 
     /**
@@ -328,33 +224,29 @@ public final class Archetype implements IArchetype {
      * due to concurrent modification and aims to be cache-friendly.
      */
     public void forEach(ArchetypeIterator iterator) {
-        ArchetypeChunk[] snap = this.chunks;
-        int count = this.chunkCount.get();
-        for (int chunkId = 0; chunkId < count; chunkId++) {
-            ArchetypeChunk chunk = snap[chunkId];
-            int i = chunk.nextOccupiedIndex(0);
-            while (i != -1) {
-                int eid = chunk.getEntityId(i);
-                if (eid != -1) iterator.accept(eid, new ArchetypeChunk.ChunkLocation(chunkId, i), chunk);
-                i = chunk.nextOccupiedIndex(i + 1);
-            }
-        }
+        ChunkGroup defaultGroup = chunkGroups.get(new SharedValueKey(null, null));
+        if (defaultGroup == null) return;
+        defaultGroup.forEach(iterator);
     }
 
     /**
      * Get component data for an entity
      */
     public MemorySegment getComponentData(ArchetypeChunk.ChunkLocation location, int componentIndex) {
-        ArchetypeChunk[] snap = this.chunks;
-        return snap[location.chunkIndex].getComponentData(componentIndex, location.indexInChunk);
+        ArchetypeChunk[] snap = this.getChunksSnapshot();
+        return (location.chunkIndex >= 0 && location.chunkIndex < snap.length)
+            ? snap[location.chunkIndex].getComponentData(componentIndex, location.indexInChunk)
+            : null;
     }
 
     /**
      * Set component data for an entity
      */
     public void setComponentData(ArchetypeChunk.ChunkLocation location, int componentIndex, MemorySegment data) {
-        ArchetypeChunk[] snap = this.chunks;
-        snap[location.chunkIndex].setComponentData(componentIndex, location.indexInChunk, data);
+        ArchetypeChunk[] snap = this.getChunksSnapshot();
+        if (location.chunkIndex >= 0 && location.chunkIndex < snap.length) {
+            snap[location.chunkIndex].setComponentData(componentIndex, location.indexInChunk, data);
+        }
     }
 
     /**
@@ -382,4 +274,26 @@ public final class Archetype implements IArchetype {
     }
 
     public int[] getManagedTypeIds() { return managedTypeIds; }
+
+    // New APIs for chunk group by shared values
+    public ChunkGroup getOrCreateChunkGroup(SharedValueKey key) {
+        return chunkGroups.computeIfAbsent(key, k -> new ChunkGroup(descriptors, componentElementSizes, entitiesPerChunk, arena, managedTypeIds.length));
+    }
+
+    public ChunkGroup getChunkGroup(SharedValueKey key) {
+        return chunkGroups.get(key);
+    }
+
+    public int[] getSharedManagedTypeIds() { return sharedManagedTypeIds; }
+    public int[] getSharedUnmanagedTypeIds() { return sharedUnmanagedTypeIds; }
+
+    public int getSharedManagedIndex(int componentTypeId) {
+        Integer idx = sharedManagedIndexMap.get(componentTypeId);
+        return idx == null ? -1 : idx;
+    }
+
+    public int getSharedUnmanagedIndex(int componentTypeId) {
+        Integer idx = sharedUnmanagedIndexMap.get(componentTypeId);
+        return idx == null ? -1 : idx;
+    }
 }

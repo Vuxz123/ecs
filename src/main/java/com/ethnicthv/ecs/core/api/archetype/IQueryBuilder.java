@@ -53,6 +53,16 @@ public interface IQueryBuilder {
     IQueryBuilder any(Class<?>... componentClasses);
 
     /**
+     * Filter by a managed shared component value. Only chunks in groups with this shared value will be considered.
+     */
+    IQueryBuilder withShared(Object managedValue);
+
+    /**
+     * Filter by an unmanaged shared component value (type + 64-bit value).
+     */
+    IQueryBuilder withShared(Class<?> unmanagedSharedType, long value);
+
+    /**
      * Build an immutable query from this builder's configuration.
      * <p>
      * The returned {@link IQuery} is thread-safe and immutable.
