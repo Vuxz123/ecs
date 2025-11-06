@@ -1,0 +1,60 @@
+Benchmark                                                                  (entities)  (entityCount)   Mode  Cnt    Score     Error   Units
+c.e.e.bench.MixedModeRunnerBenchmark.runParallel                                 1000            N/A  thrpt   25   25.015 ±   4.252  ops/ms
+c.e.e.bench.MixedModeRunnerBenchmark.runParallel                                10000            N/A  thrpt   25    3.981 ±   0.213  ops/ms
+c.e.e.bench.MixedModeRunnerBenchmark.runParallel                                50000            N/A  thrpt   25    1.502 ±   0.217  ops/ms
+c.e.e.bench.MixedModeRunnerBenchmark.runSequential                               1000            N/A  thrpt   25   28.940 ±   0.341  ops/ms
+c.e.e.bench.MixedModeRunnerBenchmark.runSequential                              10000            N/A  thrpt   25    2.703 ±   0.015  ops/ms
+c.e.e.bench.MixedModeRunnerBenchmark.runSequential                              50000            N/A  thrpt   25    0.286 ±   0.057  ops/ms
+c.e.e.benchmark.ComponentManagerBenchmark.throughput_EntitiesPerSecond            N/A         100000  thrpt    5  308.402 ± 356.977   ops/s
+c.e.e.benchmark.ComponentManagerBenchmark.throughput_EntitiesPerSecond            N/A        1000000  thrpt    5   29.361 ±  25.475   ops/s
+c.e.e.benchmark.ComponentManagerBenchmark.archetypeMigration                      N/A            N/A   avgt    5    2.754 ±   0.896   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.componentAddition                       N/A             10   avgt    5    0.079 ±   0.012   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.componentAddition                       N/A            100   avgt    5    0.104 ±   0.009   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.componentAddition                       N/A           1000   avgt    5    0.341 ±   0.019   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.componentAddition                       N/A          10000   avgt    5    2.680 ±   0.312   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.componentAddition                       N/A         100000   avgt    5   27.109 ±  10.024   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.componentAddition                       N/A        1000000   avgt    5  323.593 ± 243.591   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.componentRegistration                   N/A            N/A   avgt    5    0.002 ±   0.001   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.entityCreation                          N/A             10   avgt    5    0.006 ±   0.001   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.entityCreation                          N/A            100   avgt    5    0.017 ±   0.001   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.entityCreation                          N/A           1000   avgt    5    0.132 ±   0.009   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.entityCreation                          N/A          10000   avgt    5    1.260 ±   0.108   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.entityCreation                          N/A         100000   avgt    5   17.805 ±   3.459   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.entityCreation                          N/A        1000000   avgt    5  173.106 ± 125.745   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.handlePooling_BoundHandle               N/A            N/A   avgt    5   ≈ 10⁻⁴             ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.handlePooling_CreateRelease             N/A            N/A   avgt    5   ≈ 10⁻⁴             ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.largeScale_MultipleQueries              N/A             10   avgt    5    0.001 ±   0.001   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.largeScale_MultipleQueries              N/A            100   avgt    5    0.004 ±   0.001   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.largeScale_MultipleQueries              N/A           1000   avgt    5    0.035 ±   0.013   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.largeScale_MultipleQueries              N/A          10000   avgt    5    0.325 ±   0.088   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.largeScale_MultipleQueries              N/A         100000   avgt    5    4.654 ±   4.134   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.largeScale_MultipleQueries              N/A        1000000   avgt    5   46.429 ±  27.866   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.largeScale_ParallelQuery                N/A             10   avgt    5    0.004 ±   0.001   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.largeScale_ParallelQuery                N/A            100   avgt    5    0.008 ±   0.001   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.largeScale_ParallelQuery                N/A           1000   avgt    5    0.030 ±   0.059   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.largeScale_ParallelQuery                N/A          10000   avgt    5    0.252 ±   0.023   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.largeScale_ParallelQuery                N/A         100000   avgt    5    0.754 ±   0.580   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.largeScale_ParallelQuery                N/A        1000000   avgt    5    8.419 ±   3.129   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.largeScale_SequentialQuery              N/A             10   avgt    5   ≈ 10⁻³             ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.largeScale_SequentialQuery              N/A            100   avgt    5    0.002 ±   0.002   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.largeScale_SequentialQuery              N/A           1000   avgt    5    0.024 ±   0.017   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.largeScale_SequentialQuery              N/A          10000   avgt    5    0.242 ±   0.232   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.largeScale_SequentialQuery              N/A         100000   avgt    5    2.451 ±   2.113   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.largeScale_SequentialQuery              N/A        1000000   avgt    5   24.212 ±  23.602   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.memoryPressure_CreateAndDestroy         N/A           1000   avgt    5    0.435 ±   0.021   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.memoryPressure_CreateAndDestroy         N/A          10000   avgt    5    3.628 ±   0.550   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.memoryPressure_CreateAndDestroy         N/A         100000   avgt    5   44.429 ±  12.950   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.queryIteration_ReadWrite                N/A             10   avgt    5   ≈ 10⁻⁴             ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.queryIteration_ReadWrite                N/A            100   avgt    5    0.002 ±   0.002   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.queryIteration_ReadWrite                N/A           1000   avgt    5    0.019 ±   0.016   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.queryIteration_ReadWrite                N/A          10000   avgt    5    0.152 ±   0.090   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.queryIteration_ReadWrite                N/A         100000   avgt    5    1.684 ±   1.474   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.queryIteration_ReadWrite                N/A        1000000   avgt    5   17.031 ±  17.447   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.queryIteration_Update                   N/A             10   avgt    5   ≈ 10⁻⁴             ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.queryIteration_Update                   N/A            100   avgt    5    0.001 ±   0.001   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.queryIteration_Update                   N/A           1000   avgt    5    0.016 ±   0.011   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.queryIteration_Update                   N/A          10000   avgt    5    0.158 ±   0.088   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.queryIteration_Update                   N/A         100000   avgt    5    1.553 ±   1.100   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.queryIteration_Update                   N/A        1000000   avgt    5   16.267 ±  11.243   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.throughput_MaximalIteration             N/A         100000   avgt    5    1.857 ±   0.846   ms/op
+c.e.e.benchmark.ComponentManagerBenchmark.throughput_MaximalIteration             N/A        1000000   avgt    5   18.889 ±   2.787   ms/op
