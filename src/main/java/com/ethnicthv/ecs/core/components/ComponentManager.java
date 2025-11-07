@@ -410,62 +410,48 @@ public class ComponentManager {
 
     /**
      * Lightweight validation for shared component annotations.
-     * - @SharedComponent must be a class that overrides equals(Object) and hashCode().
-     * - @UnmanagedSharedComponent must be an interface whose declared methods are only getters (0-arg, returns int/long)
-     *   or setters (1-arg int/long, returns void).
+     * or setters (1-arg int/long, returns void).
      */
     private void validateSharedAnnotations(Class<?> cls) {
         boolean hasShared = cls.isAnnotationPresent(Component.Shared.class);
         boolean hasManaged = cls.isAnnotationPresent(Component.Managed.class);
 
-        if (hasShared) {
+        if (!hasShared) return; // nothing to validate
+
+        // Managed-shared: @Shared + @Managed must be a class overriding equals/hashCode
+        if (hasManaged) {
             if (cls.isInterface()) {
-                throw new IllegalArgumentException("@SharedComponent must be placed on a class, not an interface: " + cls.getName());
+                throw new IllegalArgumentException("@Shared (managed) must be placed on a class, not an interface: " + cls.getName());
             }
-            // Must override equals(Object) and hashCode() (possibly via a superclass, but not from Object)
             try {
                 Method eq = cls.getMethod("equals", Object.class);
-                if (eq.getDeclaringClass() == Object.class) {
-                    throw new NoSuchMethodException();
-                }
+                if (eq.getDeclaringClass() == Object.class) throw new NoSuchMethodException();
             } catch (NoSuchMethodException e) {
-                throw new IllegalArgumentException("Class " + cls.getName() + " is annotated @SharedComponent but does not override equals(Object)");
+                throw new IllegalArgumentException("Class " + cls.getName() + " is annotated @Shared but does not override equals(Object)");
             }
             try {
                 Method hc = cls.getMethod("hashCode");
-                if (hc.getDeclaringClass() == Object.class) {
-                    throw new NoSuchMethodException();
-                }
+                if (hc.getDeclaringClass() == Object.class) throw new NoSuchMethodException();
             } catch (NoSuchMethodException e) {
-                throw new IllegalArgumentException("Class " + cls.getName() + " is annotated @SharedComponent but does not override hashCode()");
+                throw new IllegalArgumentException("Class " + cls.getName() + " is annotated @Shared but does not override hashCode()");
             }
+            return;
         }
 
-        if (hasShared && hasManaged) {
-            if (!cls.isInterface()) {
-                throw new IllegalArgumentException("@UnmanagedSharedComponent must be placed on an interface: " + cls.getName());
-            }
-            Method[] declared = cls.getDeclaredMethods();
-            if (declared.length == 0) {
-                throw new IllegalArgumentException("@UnmanagedSharedComponent interface must declare at least one getter/setter method: " + cls.getName());
-            }
-            for (Method m : declared) {
-                int paramCount = m.getParameterCount();
-                Class<?> ret = m.getReturnType();
-                if (paramCount == 0) {
-                    // getter: returns int or long (primitive)
-                    if (!(ret == int.class || ret == long.class)) {
-                        throw new IllegalArgumentException("Getter method '" + m.getName() + "' in @UnmanagedSharedComponent must return int or long: " + cls.getName());
-                    }
-                } else if (paramCount == 1) {
-                    // setter: one int/long param, returns void
-                    Class<?> p0 = m.getParameterTypes()[0];
-                    if (!((p0 == int.class || p0 == long.class) && ret == void.class)) {
-                        throw new IllegalArgumentException("Setter method '" + m.getName() + "' in @UnmanagedSharedComponent must accept (int|long) and return void: " + cls.getName());
-                    }
-                } else {
-                    throw new IllegalArgumentException("Method '" + m.getName() + "' in @UnmanagedSharedComponent must be a getter or setter for a single int/long: " + cls.getName());
-                }
+        // Unmanaged-shared: @Shared without @Managed must be an class with at least one field (primitive types)
+        if (cls.isInterface()) {
+            throw new IllegalArgumentException("@Shared (unmanaged) must be placed on a class, not an interface: " + cls.getName());
+        }
+        Field[] fields = cls.getDeclaredFields();
+        if (fields.length == 0) {
+            throw new IllegalArgumentException("Class " + cls.getName() + " is annotated @Shared but has no fields");
+        }
+
+        for( Field f : fields) {
+            Class<?> t = f.getType();
+            if (!(t == int.class || t == long.class || t == float.class || t == double.class || t == boolean.class)) {
+                throw new IllegalArgumentException("Field " + f.getName() + " in @Shared unmanaged component " + cls.getName() +
+                    " has unsupported type " + t.getName() + ". Only primitive types are allowed.");
             }
         }
     }

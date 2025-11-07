@@ -1,5 +1,6 @@
 package com.ethnicthv.ecs.benchmark;
 
+import com.ethnicthv.ecs.core.api.archetype.IGeneratedQuery;
 import com.ethnicthv.ecs.core.archetype.ArchetypeWorld;
 import com.ethnicthv.ecs.core.components.ComponentManager;
 import com.ethnicthv.ecs.core.components.ComponentHandle;
@@ -31,7 +32,7 @@ public class ComponentManagerBenchmark {
 
     // ===== Systems for new API benchmarks =====
     static class ReadWriteSystem {
-        IQuery q;
+        IGeneratedQuery q;
         Blackhole bh;
         int POS_X, POS_Y, VEL_VX, VEL_VY;
         int count;
@@ -49,7 +50,7 @@ public class ComponentManagerBenchmark {
     }
 
     static class UpdateSystem {
-        IQuery q;
+        IGeneratedQuery q;
         int POS_X, VEL_VX;
         void run(){ q.runQuery(); }
         @Query(fieldInject = "q", mode = ExecutionMode.SEQUENTIAL, with = { PositionComponent.class, VelocityComponent.class })
@@ -62,7 +63,7 @@ public class ComponentManagerBenchmark {
     }
 
     static class MovementSequentialSystem {
-        IQuery q;
+        IGeneratedQuery q;
         int POS_X, VEL_VX;
         void run(){ q.runQuery(); }
         @Query(fieldInject = "q", mode = ExecutionMode.SEQUENTIAL, with = { PositionComponent.class, VelocityComponent.class })
@@ -75,7 +76,7 @@ public class ComponentManagerBenchmark {
     }
 
     static class MovementParallelSystem {
-        IQuery q;
+        IGeneratedQuery q;
         int POS_X, VEL_VX;
         void run(){ q.runQuery(); }
         @Query(fieldInject = "q", mode = ExecutionMode.PARALLEL, with = { PositionComponent.class, VelocityComponent.class })
@@ -88,7 +89,7 @@ public class ComponentManagerBenchmark {
     }
 
     static class RenderSystem {
-        IQuery q;
+        IGeneratedQuery q;
         Blackhole bh;
         int POS_X, POS_Y;
         int count;
@@ -103,7 +104,7 @@ public class ComponentManagerBenchmark {
     }
 
     static class ThroughputPosReadSystem {
-        IQuery q;
+        IGeneratedQuery q;
         int POS_X;
         void run(){ q.runQuery(); }
         @Query(fieldInject = "q", mode = ExecutionMode.SEQUENTIAL, with = { PositionComponent.class })
@@ -114,7 +115,7 @@ public class ComponentManagerBenchmark {
     }
 
     static class EntitiesPerSecondSystem {
-        IQuery q;
+        IGeneratedQuery q;
         int POS_X, POS_Y, VEL_VX, VEL_VY;
         void run(){ q.runQuery(); }
         @Query(fieldInject = "q", mode = ExecutionMode.SEQUENTIAL, with = { PositionComponent.class, VelocityComponent.class })

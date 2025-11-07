@@ -1,5 +1,6 @@
 package com.ethnicthv.ecs.archetype;
 
+import com.ethnicthv.ecs.core.api.archetype.IGeneratedQuery;
 import com.ethnicthv.ecs.core.api.archetype.IQuery;
 import com.ethnicthv.ecs.core.archetype.ArchetypeWorld;
 import com.ethnicthv.ecs.core.components.ComponentHandle;
@@ -20,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.*;
 public class MixedManagedUnmanagedRunnerTest {
 
     static class SysSequential {
-        IQuery q;
+        IGeneratedQuery q;
         final AtomicInteger count = new AtomicInteger();
         final Set<String> names = ConcurrentHashMap.newKeySet();
 
@@ -37,7 +38,7 @@ public class MixedManagedUnmanagedRunnerTest {
     }
 
     static class SysParallel {
-        IQuery q;
+        IGeneratedQuery q;
         final AtomicInteger count = new AtomicInteger();
         final Set<String> names = ConcurrentHashMap.newKeySet();
         void update(){ q.runQuery(); }

@@ -5,7 +5,6 @@ import javax.lang.model.SourceVersion;
 import javax.lang.model.element.*;
 import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.Elements;
-import javax.tools.Diagnostic;
 import javax.tools.JavaFileObject;
 import java.io.IOException;
 import java.io.Writer;
@@ -25,17 +24,26 @@ import java.util.stream.Collectors;
         "com.ethnicthv.ecs.core.components.Component.Layout",
 })
 @SupportedSourceVersion(SourceVersion.RELEASE_25)
-public class ComponentProcessor extends AbstractProcessor {
+public class ComponentProcessor extends BaseProcessor {
+    // ---------------------------------------------------------------------
+    // Constants
+    // ---------------------------------------------------------------------
+    private static final String ANNO_LAYOUT = "com.ethnicthv.ecs.core.components.Component.Layout";
+    private static final String ANNO_FIELD = "com.ethnicthv.ecs.core.components.Component.Field";
+    private static final String COMPONENT_IFACE = "com.ethnicthv.ecs.core.components.Component";
+
     private Elements elementUtils;
+    // Accumulate discovered component types to generate a central registry (FQNs)
+    private final Set<String> collectedComponents = new LinkedHashSet<>();
 
-    // Accumulate discovered component types to generate a central registry
-    private final Set<String> collectedComponents = new LinkedHashSet<>(); // FQNs
-
+    // ---------------------------------------------------------------------
+    // Lifecycle
+    // ---------------------------------------------------------------------
     @Override
     public synchronized void init(ProcessingEnvironment processingEnv) {
         super.init(processingEnv);
-        processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE, "ComponentProcessor init");
         this.elementUtils = processingEnv.getElementUtils();
+        note("ComponentProcessor init");
     }
 
     @Override
@@ -45,41 +53,22 @@ public class ComponentProcessor extends AbstractProcessor {
 
     @Override
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
-        processingEnv
-                .getMessager()
-                .printMessage(Diagnostic.Kind.NOTE, "ComponentProcessor: processing round with " + annotations.size() + " annotations");
+        note("Processing round: annotations=%d over=%s", annotations.size(), roundEnv.processingOver());
 
-        TypeElement layoutAnno = getType("com.ethnicthv.ecs.core.components.Component.Layout");
-        TypeElement fieldAnno = getType("com.ethnicthv.ecs.core.components.Component.Field");
-
-        Set<TypeElement> candidates = new LinkedHashSet<>();
-        if (layoutAnno != null) {
-            for (Element e : roundEnv.getElementsAnnotatedWith(layoutAnno)) {
-                if (e.getKind().isClass()) candidates.add((TypeElement) e);
-            }
-        }
-        if (fieldAnno != null) {
-            for (Element e : roundEnv.getElementsAnnotatedWith(fieldAnno)) {
-                Element owner = e.getEnclosingElement();
-                if (owner.getKind().isClass()) candidates.add((TypeElement) owner);
-            }
-        }
-
-        processingEnv
-                .getMessager()
-                .printMessage(Diagnostic.Kind.NOTE, "ComponentProcessor: found " + candidates.size() + " candidate component types");
+        // Collect candidate component types from both annotations
+        Set<TypeElement> candidates = collectCandidateComponentTypes(roundEnv);
+        note("Found %d candidate component types", candidates.size());
 
         if (!candidates.isEmpty()) {
-            TypeElement componentInterface = getType("com.ethnicthv.ecs.core.components.Component");
+            TypeElement componentInterface = getTypeElement(COMPONENT_IFACE);
             TypeMirror componentMirror = componentInterface != null ? componentInterface.asType() : null;
             for (TypeElement compType : candidates) {
-                processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE, "ComponentProcessor: found component: " + compType);
-
+                note("Processing component type: %s", compType.getQualifiedName());
                 if (componentMirror != null && !processingEnv.getTypeUtils().isAssignable(compType.asType(), componentMirror)) {
+                    note("Skipping %s (not assignable to Component)", compType.getQualifiedName());
                     continue;
                 }
                 try {
-                    // Generate Meta + Access for this component
                     generateForComponent(compType);
                     collectedComponents.add(compType.getQualifiedName().toString());
                 } catch (IOException ex) {
@@ -88,7 +77,7 @@ public class ComponentProcessor extends AbstractProcessor {
             }
         }
 
-        // At the final round, emit the central registry
+        // Final round: emit central registry once
         if (roundEnv.processingOver() && !collectedComponents.isEmpty()) {
             try {
                 generateCentralRegistry();
@@ -96,38 +85,78 @@ public class ComponentProcessor extends AbstractProcessor {
                 error("Failed to generate central registry: %s", ex.getMessage());
             }
         }
-
+        // Allow other processors to continue
         return false;
     }
 
+    // ---------------------------------------------------------------------
+    // Candidate discovery
+    // ---------------------------------------------------------------------
+    private Set<TypeElement> collectCandidateComponentTypes(RoundEnvironment roundEnv) {
+        Set<TypeElement> result = new LinkedHashSet<>();
+        TypeElement layoutAnno = getTypeElement(ANNO_LAYOUT);
+        TypeElement fieldAnno = getTypeElement(ANNO_FIELD);
+
+        if (layoutAnno != null) {
+            for (Element e : roundEnv.getElementsAnnotatedWith(layoutAnno)) {
+                if (e.getKind().isClass()) result.add((TypeElement) e);
+            }
+        }
+        if (fieldAnno != null) {
+            for (Element e : roundEnv.getElementsAnnotatedWith(fieldAnno)) {
+                Element owner = e.getEnclosingElement();
+                if (owner != null && owner.getKind().isClass()) result.add((TypeElement) owner);
+            }
+        }
+        return result;
+    }
+
+    // ---------------------------------------------------------------------
+    // Generation pipeline for one component
+    // ---------------------------------------------------------------------
     private void generateForComponent(TypeElement compType) throws IOException {
         String pkg = elementUtils.getPackageOf(compType).getQualifiedName().toString();
         String simpleName = compType.getSimpleName().toString();
-        String metaName = simpleName + "Meta";
-        String accessName = simpleName + "Access";
-        String fqnMeta = pkg.isEmpty() ? metaName : pkg + "." + metaName;
-        String fqnAccess = pkg.isEmpty() ? accessName : pkg + "." + accessName;
 
-        // Read layout annotation
+        // Layout info
         ComponentLayout layout = readLayout(compType);
+        // Field list
+        List<VariableElement> rawFields = collectAnnotatedFields(compType);
+        List<GeneratedField> genFields = layoutAndSizeFields(layout, rawFields);
+        long totalSize = computeTotalSize(layout, genFields);
 
-        // Collect fields annotated with @Component.Field, skipping static
-        List<VariableElement> fields = compType.getEnclosedElements().stream()
+        // Generate sources
+        generateMetaSource(pkg, simpleName, compType, genFields, totalSize, layout);
+        generateAccessSource(pkg, simpleName, genFields);
+        generateHandleSource(pkg, simpleName, genFields); // typed handle
+    }
+
+    private List<VariableElement> collectAnnotatedFields(TypeElement compType) {
+        return compType.getEnclosedElements().stream()
                 .filter(e -> e.getKind() == ElementKind.FIELD)
                 .map(VariableElement.class::cast)
-                .filter(f -> f.getAnnotationMirrors().stream()
-                        .anyMatch(am -> ((TypeElement) am.getAnnotationType().asElement()).getQualifiedName().contentEquals("com.ethnicthv.ecs.core.components.Component.Field")))
+                .filter(this::hasFieldAnnotation)
                 .filter(f -> !f.getModifiers().contains(Modifier.STATIC))
                 .collect(Collectors.toList());
+    }
 
-        // Build field list and offsets
-        List<GeneratedField> genFields = new ArrayList<>();
+    private boolean hasFieldAnnotation(Element e) {
+        for (AnnotationMirror am : e.getAnnotationMirrors()) {
+            Element el = am.getAnnotationType().asElement();
+            if (el instanceof TypeElement te && te.getQualifiedName().contentEquals(ANNO_FIELD)) return true;
+        }
+        return false;
+    }
+
+    private List<GeneratedField> layoutAndSizeFields(ComponentLayout layout, List<VariableElement> fields) {
+        List<VariableElement> work = new ArrayList<>(fields);
+        if (layout.type == LayoutType.EXPLICIT) {
+            work.sort(Comparator.comparingInt(f -> readField(f).offset));
+        }
+        List<GeneratedField> out = new ArrayList<>();
         long currentOffset = 0L;
         int maxAlignment = 1;
-        if (layout.type == LayoutType.EXPLICIT) {
-            fields.sort(Comparator.comparingInt(f -> readField(f).offset));
-        }
-        for (VariableElement ve : fields) {
+        for (VariableElement ve : work) {
             FieldAttrs attrs = readField(ve);
             String name = ve.getSimpleName().toString();
             FieldType ft = mapFieldType(ve);
@@ -139,47 +168,64 @@ public class ComponentProcessor extends AbstractProcessor {
                 offset = attrs.offset;
             } else if (layout.type == LayoutType.PADDING) {
                 offset = alignUp(currentOffset, alignment);
-            } else {
+            } else { // SEQUENTIAL default
                 offset = currentOffset;
             }
-            genFields.add(new GeneratedField(name, ft, offset, size, alignment));
+            out.add(new GeneratedField(name, ft, offset, size, alignment));
             currentOffset = offset + size;
             maxAlignment = Math.max(maxAlignment, alignment);
         }
-
-        long totalSize;
-        if (layout.sizeOverride > 0) {
-            totalSize = layout.sizeOverride;
-        } else if (layout.type == LayoutType.PADDING && !genFields.isEmpty()) {
-            totalSize = alignUp(currentOffset, maxAlignment);
-        } else {
-            totalSize = currentOffset;
-        }
-
-        // Generate Meta class
-        generateMetaSource(fqnMeta, pkg, metaName, compType, genFields, totalSize, layout);
-        // Generate Access class
-        generateAccessSource(fqnAccess, pkg, accessName, simpleName, genFields);
-        // New: Always generate a typed Handle when @Layout present
-        generateHandleSource(pkg, simpleName, genFields);
+        // Store max alignment inside layout calculation via size compute method if needed
+        return out;
     }
 
-    private void generateMetaSource(String fqn, String pkg, String metaName, TypeElement compType,
+    private long computeTotalSize(ComponentLayout layout, List<GeneratedField> fields) {
+        if (layout.sizeOverride > 0) return layout.sizeOverride;
+        long currentOffset = 0L;
+        int maxAlignment = 1;
+        for (GeneratedField f : fields) {
+            currentOffset = Math.max(currentOffset, f.offset + f.size);
+            maxAlignment = Math.max(maxAlignment, f.alignment);
+        }
+        if (layout.type == LayoutType.PADDING && !fields.isEmpty()) {
+            return alignUp(currentOffset, maxAlignment);
+        }
+        return currentOffset;
+    }
+
+    // ---------------------------------------------------------------------
+    // Individual source generation helpers
+    // ---------------------------------------------------------------------
+    private void generateMetaSource(String pkg, String simpleName, TypeElement compType,
                                     List<GeneratedField> genFields, long totalSize, ComponentLayout layout) throws IOException {
+        String metaName = simpleName + "Meta";
+        String fqn = pkg.isEmpty() ? metaName : pkg + "." + metaName;
         JavaFileObject file = processingEnv.getFiler().createSourceFile(fqn, compType);
+        // Compute explicit ComponentKind from annotations
+        boolean hasManaged = BaseProcessor.hasAnnotation(compType, "com.ethnicthv.ecs.core.components.Component.Managed");
+        boolean hasShared = BaseProcessor.hasAnnotation(compType, "com.ethnicthv.ecs.core.components.Component.Shared");
+        String kindLiteral;
+        if (hasShared) {
+            kindLiteral = hasManaged
+                ? "com.ethnicthv.ecs.core.components.ComponentDescriptor.ComponentKind.SHARED_MANAGED"
+                : "com.ethnicthv.ecs.core.components.ComponentDescriptor.ComponentKind.SHARED_UNMANAGED";
+        } else {
+            kindLiteral = hasManaged
+                ? "com.ethnicthv.ecs.core.components.ComponentDescriptor.ComponentKind.INSTANCE_MANAGED"
+                : "com.ethnicthv.ecs.core.components.ComponentDescriptor.ComponentKind.INSTANCE_UNMANAGED";
+        }
         try (Writer w = file.openWriter()) {
-            if (!pkg.isEmpty()) {
-                w.write("package " + pkg + ";\n\n");
-            }
+            if (!pkg.isEmpty()) w.write("package " + pkg + ";\n\n");
             w.write("@SuppressWarnings(\"all\")\n");
             w.write("public final class " + metaName + " {\n");
 
+            // Field index constants
             for (int i = 0; i < genFields.size(); i++) {
-                String constName = "IDX_" + genFields.get(i).name.toUpperCase(Locale.ROOT);
-                w.write("    public static final int " + constName + " = " + i + ";\n");
+                w.write("    public static final int IDX_" + genFields.get(i).name.toUpperCase(Locale.ROOT) + " = " + i + ";\n");
             }
             w.write("\n");
 
+            // Descriptor build with explicit kind
             w.write("    public static final com.ethnicthv.ecs.core.components.ComponentDescriptor DESCRIPTOR =\n");
             w.write("        new com.ethnicthv.ecs.core.components.ComponentDescriptor(\n");
             w.write("            " + compType.getQualifiedName() + ".class,\n");
@@ -187,15 +233,15 @@ public class ComponentProcessor extends AbstractProcessor {
             w.write("            java.util.List.of(\n");
             for (int i = 0; i < genFields.size(); i++) {
                 GeneratedField f = genFields.get(i);
-                w.write("                new com.ethnicthv.ecs.core.components.ComponentDescriptor.FieldDescriptor(\n");
-                w.write("                    \"" + f.name + "\", ");
+                w.write("                new com.ethnicthv.ecs.core.components.ComponentDescriptor.FieldDescriptor(\"" + f.name + "\", ");
                 w.write("com.ethnicthv.ecs.core.components.ComponentDescriptor.FieldType." + f.ft.enumName + ", ");
                 w.write(f.offset + "L, " + f.size + "L, " + f.alignment + ")");
                 if (i < genFields.size() - 1) w.write(",");
                 w.write("\n");
             }
             w.write("            ),\n");
-            w.write("            com.ethnicthv.ecs.core.components.Component.LayoutType." + layout.type.name() + "\n");
+            w.write("            com.ethnicthv.ecs.core.components.Component.LayoutType." + layout.type.name() + ",\n");
+            w.write("            " + kindLiteral + "\n");
             w.write("        );\n\n");
 
             w.write("    public static com.ethnicthv.ecs.core.components.ComponentDescriptor descriptor() { return DESCRIPTOR; }\n\n");
@@ -204,83 +250,87 @@ public class ComponentProcessor extends AbstractProcessor {
         }
     }
 
-    private void generateAccessSource(String fqn, String pkg, String accessName, String simpleName,
-                                      List<GeneratedField> genFields) throws IOException {
+    private void generateAccessSource(String pkg, String simpleName, List<GeneratedField> genFields) throws IOException {
+        String accessName = simpleName + "Access";
+        String fqn = pkg.isEmpty() ? accessName : pkg + "." + accessName;
         JavaFileObject file = processingEnv.getFiler().createSourceFile(fqn);
         try (Writer w = file.openWriter()) {
-            if (!pkg.isEmpty()) {
-                w.write("package " + pkg + ";\n\n");
-            }
+            if (!pkg.isEmpty()) w.write("package " + pkg + ";\n\n");
             w.write("@SuppressWarnings(\"all\")\n");
             w.write("public final class " + accessName + " {\n");
             w.write("    private " + accessName + "() {}\n\n");
-            w.write("    // Re-export field indices for convenience\n");
             w.write("    public static final int FIELD_COUNT = " + genFields.size() + ";\n");
             for (GeneratedField f : genFields) {
                 String constName = "IDX_" + f.name.toUpperCase(Locale.ROOT);
                 w.write("    public static final int " + constName + " = " + simpleName + "Meta." + constName + ";\n");
             }
             w.write("\n");
-            w.write("    // Type-safe generic getters\n");
-            w.write("    public static float getFloat(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getFloat(fieldIndex); }\n");
-            w.write("    public static int getInt(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getInt(fieldIndex); }\n");
-            w.write("    public static long getLong(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getLong(fieldIndex); }\n");
-            w.write("    public static double getDouble(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getDouble(fieldIndex); }\n");
-            w.write("    public static boolean getBoolean(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getBoolean(fieldIndex); }\n");
-            w.write("    public static byte getByte(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getByte(fieldIndex); }\n");
-            w.write("    public static short getShort(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getShort(fieldIndex); }\n");
-            w.write("    public static char getChar(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getChar(fieldIndex); }\n\n");
-            w.write("    // Type-safe generic setters\n");
-            w.write("    public static void setFloat(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, float v) { h.setFloat(fieldIndex, v); }\n");
-            w.write("    public static void setInt(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, int v) { h.setInt(fieldIndex, v); }\n");
-            w.write("    public static void setLong(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, long v) { h.setLong(fieldIndex, v); }\n");
-            w.write("    public static void setDouble(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, double v) { h.setDouble(fieldIndex, v); }\n");
-            w.write("    public static void setBoolean(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, boolean v) { h.setBoolean(fieldIndex, v); }\n");
-            w.write("    public static void setByte(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, byte v) { h.setByte(fieldIndex, v); }\n");
-            w.write("    public static void setShort(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, short v) { h.setShort(fieldIndex, v); }\n");
-            w.write("    public static void setChar(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, char v) { h.setChar(fieldIndex, v); }\n\n");
-
-            // Per-field named getters/setters
+            writeGenericAccessors(w);
+            // Named per-field helpers
             for (GeneratedField f : genFields) {
-                String methodSuffix = toCamelCase(f.name);
-                String idxConst = "IDX_" + f.name.toUpperCase(Locale.ROOT);
-                switch (f.ft) {
-                    case FLOAT -> {
-                        w.write("    public static float get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getFloat(" + idxConst + "); }\n");
-                        w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, float v) { h.setFloat(" + idxConst + ", v); }\n");
-                    }
-                    case INT -> {
-                        w.write("    public static int get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getInt(" + idxConst + "); }\n");
-                        w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, int v) { h.setInt(" + idxConst + ", v); }\n");
-                    }
-                    case LONG -> {
-                        w.write("    public static long get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getLong(" + idxConst + "); }\n");
-                        w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, long v) { h.setLong(" + idxConst + ", v); }\n");
-                    }
-                    case DOUBLE -> {
-                        w.write("    public static double get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getDouble(" + idxConst + "); }\n");
-                        w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, double v) { h.setDouble(" + idxConst + ", v); }\n");
-                    }
-                    case BOOLEAN -> {
-                        w.write("    public static boolean get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getBoolean(" + idxConst + "); }\n");
-                        w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, boolean v) { h.setBoolean(" + idxConst + ", v); }\n");
-                    }
-                    case BYTE -> {
-                        w.write("    public static byte get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getByte(" + idxConst + "); }\n");
-                        w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, byte v) { h.setByte(" + idxConst + ", v); }\n");
-                    }
-                    case SHORT -> {
-                        w.write("    public static short get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getShort(" + idxConst + "); }\n");
-                        w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, short v) { h.setShort(" + idxConst + ", v); }\n");
-                    }
-                    case CHAR -> {
-                        w.write("    public static char get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getChar(" + idxConst + "); }\n");
-                        w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, char v) { h.setChar(" + idxConst + ", v); }\n");
-                    }
-                }
+                writeNamedAccessor(w, f);
             }
-
             w.write("}\n");
+        }
+    }
+
+    private void writeGenericAccessors(Writer w) throws IOException {
+        w.write("    // Type-safe generic getters\n");
+        w.write("    public static float getFloat(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getFloat(fieldIndex); }\n");
+        w.write("    public static int getInt(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getInt(fieldIndex); }\n");
+        w.write("    public static long getLong(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getLong(fieldIndex); }\n");
+        w.write("    public static double getDouble(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getDouble(fieldIndex); }\n");
+        w.write("    public static boolean getBoolean(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getBoolean(fieldIndex); }\n");
+        w.write("    public static byte getByte(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getByte(fieldIndex); }\n");
+        w.write("    public static short getShort(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getShort(fieldIndex); }\n");
+        w.write("    public static char getChar(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getChar(fieldIndex); }\n\n");
+        w.write("    // Type-safe generic setters\n");
+        w.write("    public static void setFloat(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, float v) { h.setFloat(fieldIndex, v); }\n");
+        w.write("    public static void setInt(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, int v) { h.setInt(fieldIndex, v); }\n");
+        w.write("    public static void setLong(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, long v) { h.setLong(fieldIndex, v); }\n");
+        w.write("    public static void setDouble(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, double v) { h.setDouble(fieldIndex, v); }\n");
+        w.write("    public static void setBoolean(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, boolean v) { h.setBoolean(fieldIndex, v); }\n");
+        w.write("    public static void setByte(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, byte v) { h.setByte(fieldIndex, v); }\n");
+        w.write("    public static void setShort(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, short v) { h.setShort(fieldIndex, v); }\n");
+        w.write("    public static void setChar(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, char v) { h.setChar(fieldIndex, v); }\n\n");
+    }
+
+    private void writeNamedAccessor(Writer w, GeneratedField f) throws IOException {
+        String methodSuffix = toCamelCase(f.name);
+        String idxConst = "IDX_" + f.name.toUpperCase(Locale.ROOT);
+        switch (f.ft) {
+            case FLOAT -> {
+                w.write("    public static float get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getFloat(" + idxConst + "); }\n");
+                w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, float v) { h.setFloat(" + idxConst + ", v); }\n");
+            }
+            case INT -> {
+                w.write("    public static int get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getInt(" + idxConst + "); }\n");
+                w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, int v) { h.setInt(" + idxConst + ", v); }\n");
+            }
+            case LONG -> {
+                w.write("    public static long get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getLong(" + idxConst + "); }\n");
+                w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, long v) { h.setLong(" + idxConst + ", v); }\n");
+            }
+            case DOUBLE -> {
+                w.write("    public static double get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getDouble(" + idxConst + "); }\n");
+                w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, double v) { h.setDouble(" + idxConst + ", v); }\n");
+            }
+            case BOOLEAN -> {
+                w.write("    public static boolean get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getBoolean(" + idxConst + "); }\n");
+                w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, boolean v) { h.setBoolean(" + idxConst + ", v); }\n");
+            }
+            case BYTE -> {
+                w.write("    public static byte get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getByte(" + idxConst + "); }\n");
+                w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, byte v) { h.setByte(" + idxConst + ", v); }\n");
+            }
+            case SHORT -> {
+                w.write("    public static short get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getShort(" + idxConst + "); }\n");
+                w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, short v) { h.setShort(" + idxConst + ", v); }\n");
+            }
+            case CHAR -> {
+                w.write("    public static char get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getChar(" + idxConst + "); }\n");
+                w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, char v) { h.setChar(" + idxConst + ", v); }\n");
+            }
         }
     }
 
@@ -349,31 +399,21 @@ public class ComponentProcessor extends AbstractProcessor {
             w.write("    private " + name + "() {}\n\n");
             w.write("    public static void registerAll(com.ethnicthv.ecs.core.components.ComponentManager mgr) {\n");
             for (String fqnComp : collectedComponents) {
-                String meta = fqnComp + "Meta";
-                w.write("        mgr.registerComponentWithDescriptor(" + fqnComp + ".class, " + meta + ".DESCRIPTOR);\n");
+                w.write("        mgr.registerComponentWithDescriptor(" + fqnComp + ".class, " + fqnComp + "Meta.DESCRIPTOR);\n");
             }
             w.write("    }\n");
             w.write("}\n");
         }
     }
 
-    private TypeElement getType(String fqn) {
-        return processingEnv.getElementUtils().getTypeElement(fqn);
-    }
-
-    private void error(String fmt, Object... args) {
-        processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR, String.format(Locale.ROOT, fmt, args));
-    }
-
-    private long alignUp(long value, int alignment) {
-        return ((value + alignment - 1L) / alignment) * alignment;
-    }
-
+    // ---------------------------------------------------------------------
+    // Annotation reading & utility
+    // ---------------------------------------------------------------------
     private ComponentLayout readLayout(TypeElement type) {
         for (AnnotationMirror am : type.getAnnotationMirrors()) {
             Element el = am.getAnnotationType().asElement();
             if (!(el instanceof TypeElement te)) continue;
-            if (!te.getQualifiedName().contentEquals("com.ethnicthv.ecs.core.components.Component.Layout")) continue;
+            if (!te.getQualifiedName().contentEquals(ANNO_LAYOUT)) continue;
             LayoutType kind = LayoutType.SEQUENTIAL;
             long sz = -1;
             for (Map.Entry<? extends ExecutableElement, ? extends AnnotationValue> e : am.getElementValues().entrySet()) {
@@ -387,25 +427,26 @@ public class ComponentProcessor extends AbstractProcessor {
             }
             return new ComponentLayout(kind, sz);
         }
-        return new ComponentLayout(LayoutType.SEQUENTIAL, -1);
+        return new ComponentLayout(LayoutType.SEQUENTIAL, -1); // default
     }
 
     private FieldAttrs readField(VariableElement ve) {
         for (AnnotationMirror am : ve.getAnnotationMirrors()) {
             Element el = am.getAnnotationType().asElement();
             if (!(el instanceof TypeElement te)) continue;
-            if (!te.getQualifiedName().contentEquals("com.ethnicthv.ecs.core.components.Component.Field")) continue;
+            if (!te.getQualifiedName().contentEquals(ANNO_FIELD)) continue;
             int size = 0;
             int offset = -1;
             int alignment = 0;
             for (Map.Entry<? extends ExecutableElement, ? extends AnnotationValue> e : am.getElementValues().entrySet()) {
                 String name = e.getKey().getSimpleName().toString();
                 Object av = e.getValue().getValue();
-                if (!(av instanceof Number n)) continue;
-                switch (name) {
-                    case "size" -> size = n.intValue();
-                    case "offset" -> offset = n.intValue();
-                    case "alignment" -> alignment = n.intValue();
+                if (av instanceof Number n) {
+                    switch (name) {
+                        case "size" -> size = n.intValue();
+                        case "offset" -> offset = n.intValue();
+                        case "alignment" -> alignment = n.intValue();
+                    }
                 }
             }
             return new FieldAttrs(size, offset, alignment);
@@ -426,7 +467,7 @@ public class ComponentProcessor extends AbstractProcessor {
             case "char", "java.lang.Character" -> FieldType.CHAR;
             default -> {
                 error("Unsupported field type %s in %s", tn, ve.getEnclosingElement().getSimpleName());
-                yield FieldType.INT; // keep going to report all errors
+                yield FieldType.INT; // fallback to continue processing
             }
         };
     }
@@ -447,17 +488,23 @@ public class ComponentProcessor extends AbstractProcessor {
         return sb.toString();
     }
 
+    private long alignUp(long value, int alignment) {
+        return ((value + alignment - 1L) / alignment) * alignment;
+    }
+
+    // ---------------------------------------------------------------------
+    // Internal data structures
+    // ---------------------------------------------------------------------
     private record ComponentLayout(LayoutType type, long sizeOverride) {}
     private enum LayoutType { SEQUENTIAL, PADDING, EXPLICIT }
     private record FieldAttrs(int size, int offset, int alignment) {}
-    private static class GeneratedField {
+    private static final class GeneratedField {
         final String name; final FieldType ft; final long offset; final long size; final int alignment;
-        GeneratedField(String n, FieldType ft, long off, long sz, int a) { this.name=n; this.ft=ft; this.offset=off; this.size=sz; this.alignment=a; }
+        GeneratedField(String n, FieldType ft, long off, long sz, int a) { this.name = n; this.ft = ft; this.offset = off; this.size = sz; this.alignment = a; }
     }
-
     private enum FieldType {
         BYTE(1,1,"BYTE"), SHORT(2,2,"SHORT"), INT(4,4,"INT"), LONG(8,8,"LONG"), FLOAT(4,4,"FLOAT"), DOUBLE(8,8,"DOUBLE"), BOOLEAN(1,1,"BOOLEAN"), CHAR(2,2,"CHAR");
         final long size; final int naturalAlignment; final String enumName;
-        FieldType(long sz, int na, String en) { this.size=sz; this.naturalAlignment=na; this.enumName=en; }
+        FieldType(long sz, int na, String en) { this.size = sz; this.naturalAlignment = na; this.enumName = en; }
     }
 }

@@ -1,5 +1,6 @@
 package com.ethnicthv.ecs.archetype;
 
+import com.ethnicthv.ecs.core.api.archetype.IGeneratedQuery;
 import com.ethnicthv.ecs.core.api.archetype.IQuery;
 import com.ethnicthv.ecs.core.archetype.ArchetypeWorld;
 import com.ethnicthv.ecs.core.components.ComponentHandle;
@@ -15,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.*;
 public class NegativeQueryRunnerTests {
 
     static class SysManagedParamButUnmanagedDescriptor {
-        IQuery q;
+        IGeneratedQuery q;
         void update(){ q.runQuery(); }
 
         // Declared as managed object parameter but descriptor is unmanaged -> should throw in validateConfig
@@ -26,7 +27,7 @@ public class NegativeQueryRunnerTests {
     }
 
     static class SysUnmanagedParamMissingRawComponent {
-        IQuery q;
+        IGeneratedQuery q;
         int count;
         void update(){ q.runQuery(); }
 

@@ -1,5 +1,6 @@
 package com.ethnicthv.ecs.bench;
 
+import com.ethnicthv.ecs.core.api.archetype.IGeneratedQuery;
 import com.ethnicthv.ecs.core.api.archetype.IQuery;
 import com.ethnicthv.ecs.core.archetype.ArchetypeWorld;
 import com.ethnicthv.ecs.core.components.ComponentHandle;
@@ -16,7 +17,7 @@ import java.util.concurrent.TimeUnit;
 @State(Scope.Benchmark)
 public class MixedModeRunnerBenchmark {
 
-    static class SysSeq { IQuery q; @Query(fieldInject="q", mode=ExecutionMode.SEQUENTIAL, with={Pos.class, Tag.class})
+    static class SysSeq { IGeneratedQuery q; @Query(fieldInject="q", mode=ExecutionMode.SEQUENTIAL, with={Pos.class, Tag.class})
         private void query(@com.ethnicthv.ecs.core.system.annotation.Component(type=Pos.class) ComponentHandle pos,
                            @com.ethnicthv.ecs.core.system.annotation.Component(type=Tag.class) Tag tag) {
             int ix = pos.resolveFieldIndex("x");
@@ -25,7 +26,7 @@ public class MixedModeRunnerBenchmark {
             pos.setFloat(iy, pos.getFloat(iy) + 1f);
         } }
 
-    static class SysPar { IQuery q; @Query(fieldInject="q", mode=ExecutionMode.PARALLEL, with={Pos.class, Tag.class})
+    static class SysPar { IGeneratedQuery q; @Query(fieldInject="q", mode=ExecutionMode.PARALLEL, with={Pos.class, Tag.class})
         private void query(@com.ethnicthv.ecs.core.system.annotation.Component(type=Pos.class) ComponentHandle pos,
                            @com.ethnicthv.ecs.core.system.annotation.Component(type=Tag.class) Tag tag) {
             int ix = pos.resolveFieldIndex("x");

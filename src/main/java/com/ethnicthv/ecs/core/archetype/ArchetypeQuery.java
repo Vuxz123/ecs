@@ -35,10 +35,11 @@ public final class ArchetypeQuery implements IQueryBuilder, IQuery {
     private Object managedSharedFilter = null;
     private final List<UnmanagedFilter> unmanagedSharedFilters = new ArrayList<>();
 
-    private static final class UnmanagedFilter {
-        final Class<?> type;
-        final long value;
-        UnmanagedFilter(Class<?> type, long value) { this.type = type; this.value = value; }
+    // Expose for generated code to reference as a type
+    public static final class UnmanagedFilter {
+        public final Class<?> type;
+        public final long value;
+        public UnmanagedFilter(Class<?> type, long value) { this.type = type; this.value = value; }
     }
 
     public ArchetypeQuery(ArchetypeWorld world) { this.world = world; }

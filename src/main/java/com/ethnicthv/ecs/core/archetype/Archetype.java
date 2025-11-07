@@ -7,6 +7,7 @@ import com.ethnicthv.ecs.core.components.ComponentDescriptor;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -295,5 +296,9 @@ public final class Archetype implements IArchetype {
     public int getSharedUnmanagedIndex(int componentTypeId) {
         Integer idx = sharedUnmanagedIndexMap.get(componentTypeId);
         return idx == null ? -1 : idx;
+    }
+
+    public java.util.Collection<ChunkGroup> getAllChunkGroups() {
+        return chunkGroups.values();
     }
 }

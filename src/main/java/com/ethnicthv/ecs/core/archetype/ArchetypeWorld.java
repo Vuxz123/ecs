@@ -227,11 +227,12 @@ public final class ArchetypeWorld implements AutoCloseable {
         EntityRecord newRecord = entityRecords.get(entityId);
         int managedTypeIndex = newRecord.archetype.getManagedTypeIndex(componentTypeId);
         if (managedTypeIndex < 0) {
-            // Should not happen if descriptor is managed and mask includes it
             throw new IllegalStateException("Managed type index not found for component id=" + componentTypeId);
         }
-        ArchetypeChunk chunk = newRecord.archetype.getChunk(newRecord.location.chunkIndex);
-        chunk.setManagedTicket(managedTypeIndex, newRecord.location.indexInChunk, ticket);
+        ChunkGroup newGroup = newRecord.archetype.getChunkGroup(newRecord.sharedKey);
+        if (newGroup == null) throw new IllegalStateException("ChunkGroup not found for new entity shared key");
+        ArchetypeChunk newChunk = newGroup.getChunk(newRecord.location.chunkIndex);
+        newChunk.setManagedTicket(managedTypeIndex, newRecord.location.indexInChunk, ticket);
     }
 
     /**
@@ -253,10 +254,13 @@ public final class ArchetypeWorld implements AutoCloseable {
         if (desc != null && desc.isManaged()) {
             int managedIdx = record.archetype.getManagedTypeIndex(componentTypeId);
             if (managedIdx >= 0) {
-                ArchetypeChunk chunk = record.archetype.getChunk(record.location.chunkIndex);
-                int ticket = chunk.getManagedTicket(managedIdx, record.location.indexInChunk);
-                if (ticket >= 0) {
-                    managedStore.release(ticket);
+                ChunkGroup group = record.archetype.getChunkGroup(record.sharedKey);
+                if (group != null) {
+                    ArchetypeChunk chunk = group.getChunk(record.location.chunkIndex);
+                    int ticket = chunk.getManagedTicket(managedIdx, record.location.indexInChunk);
+                    if (ticket >= 0) {
+                        managedStore.release(ticket);
+                    }
                 }
             }
         }
@@ -308,10 +312,13 @@ public final class ArchetypeWorld implements AutoCloseable {
             // Release all managed tickets for this entity before removing
             int[] managedIds = record.archetype.getManagedTypeIds();
             if (managedIds != null && managedIds.length > 0) {
-                ArchetypeChunk chunk = record.archetype.getChunk(record.location.chunkIndex);
-                for (int i = 0; i < managedIds.length; i++) {
-                    int ticket = chunk.getManagedTicket(i, record.location.indexInChunk);
-                    if (ticket >= 0) managedStore.release(ticket);
+                ChunkGroup group = record.archetype.getChunkGroup(record.sharedKey);
+                if (group != null) {
+                    ArchetypeChunk chunk = group.getChunk(record.location.chunkIndex);
+                    for (int i = 0; i < managedIds.length; i++) {
+                        int ticket = chunk.getManagedTicket(i, record.location.indexInChunk);
+                        if (ticket >= 0) managedStore.release(ticket);
+                    }
                 }
             }
             // Release shared managed tickets referenced by key
@@ -390,7 +397,9 @@ public final class ArchetypeWorld implements AutoCloseable {
         if (desc == null || !desc.isManaged()) return null;
         int mIdx = record.archetype.getManagedTypeIndex(typeId);
         if (mIdx < 0) return null;
-        ArchetypeChunk chunk = record.archetype.getChunk(record.location.chunkIndex);
+        ChunkGroup group = record.archetype.getChunkGroup(record.sharedKey);
+        if (group == null) return null;
+        ArchetypeChunk chunk = group.getChunk(record.location.chunkIndex);
         int ticket = chunk.getManagedTicket(mIdx, record.location.indexInChunk);
         if (ticket < 0) return null;
         Object obj = managedStore.get(ticket);
@@ -418,7 +427,9 @@ public final class ArchetypeWorld implements AutoCloseable {
         }
         // Release old ticket (if any)
         int mIdx = record.archetype.getManagedTypeIndex(typeId);
-        ArchetypeChunk chunk = record.archetype.getChunk(record.location.chunkIndex);
+        ChunkGroup group = record.archetype.getChunkGroup(record.sharedKey);
+        if (group == null) throw new IllegalStateException("ChunkGroup not found for entity shared key");
+        ArchetypeChunk chunk = group.getChunk(record.location.chunkIndex);
         int oldTicket = chunk.getManagedTicket(mIdx, record.location.indexInChunk);
         if (oldTicket >= 0) managedStore.release(oldTicket);
         // Store new instance and set ticket
@@ -435,25 +446,40 @@ public final class ArchetypeWorld implements AutoCloseable {
         if (typeId == null) throw new IllegalArgumentException("Shared component type not registered: " + type.getName());
         ComponentDescriptor desc = componentManager.getDescriptor(type);
         if (desc == null || desc.getKind() != ComponentDescriptor.ComponentKind.SHARED_MANAGED) {
-            throw new IllegalArgumentException("Type is not a @SharedComponent managed type: " + type.getName());
+            throw new IllegalArgumentException("Type is not a @Shared @Managed Component type: " + type.getName());
         }
         EntityRecord record = entityRecords.get(entityId);
         if (record == null) throw new IllegalArgumentException("Entity does not exist: " + entityId);
+        // If current archetype does not yet contain this shared type, structurally add it by extending the mask.
+        int pos = record.archetype.getSharedManagedIndex(typeId);
+        if (pos < 0) {
+            ComponentMask newMask = record.mask.set(typeId);
+            // Move entity to new archetype with extended mask (retain old shared key first)
+            moveEntityToArchetype(entityId, record, record.mask, newMask, record.sharedKey);
+            record = entityRecords.get(entityId);
+            pos = record.archetype.getSharedManagedIndex(typeId);
+            if (pos < 0) throw new IllegalStateException("Shared managed type index still missing after structural add: id=" + typeId);
+        }
         int ticket = sharedStore.getOrAddSharedIndex(managedValue);
         SharedValueKey oldKey = record.sharedKey;
         int[] managedIdx;
-        if (oldKey != null && oldKey.managedSharedIndices() != null) {
+        // Prepare sized array matching current archetype's shared managed type ids
+        int managedCount = record.archetype.getSharedManagedTypeIds().length;
+        if (oldKey != null && oldKey.managedSharedIndices() != null && oldKey.managedSharedIndices().length == managedCount) {
             managedIdx = oldKey.managedSharedIndices().clone();
         } else {
-            managedIdx = new int[record.archetype.getSharedManagedTypeIds().length];
-            Arrays.fill(managedIdx, -1);
+            managedIdx = new int[managedCount];
+            java.util.Arrays.fill(managedIdx, -1);
+            if (oldKey != null && oldKey.managedSharedIndices() != null) {
+                // Copy overlapping old indices into new sized array (in case of expansion)
+                int copyLen = Math.min(managedIdx.length, oldKey.managedSharedIndices().length);
+                System.arraycopy(oldKey.managedSharedIndices(), 0, managedIdx, 0, copyLen);
+            }
         }
-        int pos = record.archetype.getSharedManagedIndex(typeId);
-        if (pos < 0) throw new IllegalArgumentException("Shared managed type not part of this archetype: id=" + typeId);
         int old = managedIdx[pos];
         managedIdx[pos] = ticket;
         SharedValueKey newKey = new SharedValueKey(managedIdx, oldKey != null ? oldKey.unmanagedSharedValues() : null);
-        if (oldKey != null && Arrays.equals(oldKey.managedSharedIndices(), managedIdx)) return;
+        if (oldKey != null && java.util.Arrays.equals(oldKey.managedSharedIndices(), managedIdx)) return; // unchanged
         moveEntityToArchetype(entityId, record, record.mask, record.mask, newKey);
         if (oldKey != null && old >= 0 && old != ticket) sharedStore.releaseSharedIndex(old);
     }
@@ -463,24 +489,38 @@ public final class ArchetypeWorld implements AutoCloseable {
         if (typeId == null) throw new IllegalArgumentException("Shared component type not registered: " + unmanagedSharedType.getName());
         ComponentDescriptor desc = componentManager.getDescriptor(unmanagedSharedType);
         if (desc == null || desc.getKind() != ComponentDescriptor.ComponentKind.SHARED_UNMANAGED) {
-            throw new IllegalArgumentException("Type is not an @UnmanagedSharedComponent type: " + unmanagedSharedType.getName());
+            throw new IllegalArgumentException("Type is not an @Unmanaged @Shared Component type: " + unmanagedSharedType.getName());
         }
         EntityRecord record = entityRecords.get(entityId);
         if (record == null) throw new IllegalArgumentException("Entity does not exist: " + entityId);
+        // Ensure archetype contains shared unmanaged type; if not, extend mask.
+        int pos = record.archetype.getSharedUnmanagedIndex(typeId);
+        if (pos < 0) {
+            ComponentMask newMask = record.mask.set(typeId);
+            moveEntityToArchetype(entityId, record, record.mask, newMask, record.sharedKey);
+            record = entityRecords.get(entityId);
+            pos = record.archetype.getSharedUnmanagedIndex(typeId);
+            if (pos < 0) throw new IllegalStateException("Shared unmanaged type index still missing after structural add: id=" + typeId);
+        }
         SharedValueKey oldKey = record.sharedKey;
+        int unmanagedCount = record.archetype.getSharedUnmanagedTypeIds().length;
         long[] unmanagedVals;
-        if (oldKey != null && oldKey.unmanagedSharedValues() != null) {
+        if (oldKey != null && oldKey.unmanagedSharedValues() != null && oldKey.unmanagedSharedValues().length == unmanagedCount) {
             unmanagedVals = oldKey.unmanagedSharedValues().clone();
         } else {
-            unmanagedVals = new long[record.archetype.getSharedUnmanagedTypeIds().length];
-            Arrays.fill(unmanagedVals, Long.MIN_VALUE);
+            unmanagedVals = new long[unmanagedCount];
+            java.util.Arrays.fill(unmanagedVals, Long.MIN_VALUE);
+            if (oldKey != null && oldKey.unmanagedSharedValues() != null) {
+                int copyLen = Math.min(unmanagedVals.length, oldKey.unmanagedSharedValues().length);
+                System.arraycopy(oldKey.unmanagedSharedValues(), 0, unmanagedVals, 0, copyLen);
+            }
         }
-        int pos = record.archetype.getSharedUnmanagedIndex(typeId);
-        if (pos < 0) throw new IllegalArgumentException("Shared unmanaged type not part of this archetype: id=" + typeId);
+        long oldVal = unmanagedVals[pos];
         unmanagedVals[pos] = value;
         SharedValueKey newKey = new SharedValueKey(oldKey != null ? oldKey.managedSharedIndices() : null, unmanagedVals);
-        if (oldKey != null && Arrays.equals(oldKey.unmanagedSharedValues(), unmanagedVals)) return;
+        if (oldKey != null && java.util.Arrays.equals(oldKey.unmanagedSharedValues(), unmanagedVals)) return; // unchanged
         moveEntityToArchetype(entityId, record, record.mask, record.mask, newKey);
+        // no ticket release for unmanaged values
     }
 
     // Expose non-mutating shared index lookup for query building
@@ -491,30 +531,34 @@ public final class ArchetypeWorld implements AutoCloseable {
     // ============ Internal Methods ============
 
     private void moveEntityToArchetype(int entityId, EntityRecord oldRecord, ComponentMask oldMask, ComponentMask newMask, SharedValueKey newSharedKey) {
-        // Delegate archetype construction to ArchetypeManager
         Archetype newArchetype = archetypeManager.getOrCreateArchetype(newMask);
         ChunkGroup newGroup = newArchetype.getOrCreateChunkGroup(newSharedKey);
         ArchetypeChunk.ChunkLocation newLocation = newGroup.addEntity(entityId);
 
-        // Copy unmanaged instance data intersection
+        // Obtain old group (may be null if not present any more)
+        ChunkGroup oldGroup = oldRecord.archetype.getChunkGroup(oldRecord.sharedKey);
+        ArchetypeChunk oldChunk = (oldGroup != null) ? oldGroup.getChunk(oldRecord.location.chunkIndex) : null;
+        ArchetypeChunk newChunk = newGroup.getChunk(newLocation.chunkIndex);
+
+        // Copy unmanaged instance data intersection using group-specific chunks
         int[] typeIds = newMask.toComponentIdArray();
         for (int componentTypeId : typeIds) {
             if (oldMask.has(componentTypeId)) {
                 int oldIdx = oldRecord.archetype.indexOfComponentType(componentTypeId);
                 int newIdx = newArchetype.indexOfComponentType(componentTypeId);
-                if (oldIdx >= 0 && newIdx >= 0) {
-                    MemorySegment oldData = oldRecord.archetype.getComponentData(oldRecord.location, oldIdx);
-                    if (oldData != null) newArchetype.setComponentData(newLocation, newIdx, oldData);
+                if (oldIdx >= 0 && newIdx >= 0 && oldChunk != null) {
+                    var oldData = oldChunk.getComponentData(oldIdx, oldRecord.location.indexInChunk);
+                    if (oldData != null) {
+                        newChunk.setComponentData(newIdx, newLocation.indexInChunk, oldData);
+                    }
                 }
             }
         }
 
-        // Transfer managed instance tickets intersection
+        // Transfer managed instance tickets intersection using group-specific chunks
         int[] oldManaged = oldRecord.archetype.getManagedTypeIds();
         int[] newManaged = newArchetype.getManagedTypeIds();
-        if (oldManaged != null && newManaged != null && oldManaged.length > 0 && newManaged.length > 0) {
-            ArchetypeChunk oldChunk = oldRecord.archetype.getChunk(oldRecord.location.chunkIndex);
-            ArchetypeChunk newChunk = newArchetype.getChunk(newLocation.chunkIndex);
+        if (oldManaged != null && newManaged != null && oldManaged.length > 0 && newManaged.length > 0 && oldChunk != null && newChunk != null) {
             for (int tid : oldManaged) {
                 int oldMIdx = oldRecord.archetype.getManagedTypeIndex(tid);
                 int newMIdx = newArchetype.getManagedTypeIndex(tid);
@@ -525,8 +569,7 @@ public final class ArchetypeWorld implements AutoCloseable {
             }
         }
 
-        // Remove from old group and update
-        ChunkGroup oldGroup = oldRecord.archetype.getChunkGroup(oldRecord.sharedKey);
+        // Remove from old group and update record
         if (oldGroup != null) oldGroup.removeEntity(oldRecord.location);
         entityRecords.put(entityId, new EntityRecord(newArchetype, newLocation, newMask, newSharedKey));
     }
