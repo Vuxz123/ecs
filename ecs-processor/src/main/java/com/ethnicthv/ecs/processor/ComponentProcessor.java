@@ -35,6 +35,8 @@ public class ComponentProcessor extends BaseProcessor {
     private Elements elementUtils;
     // Accumulate discovered component types to generate a central registry (FQNs)
     private final Set<String> collectedComponents = new LinkedHashSet<>();
+    // In-memory descriptors for already-processed component types within a round
+    private final Map<String, LocalDescriptor> generatedDescriptors = new LinkedHashMap<>();
 
     // ---------------------------------------------------------------------
     // Lifecycle
@@ -54,38 +56,34 @@ public class ComponentProcessor extends BaseProcessor {
     @Override
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
         note("Processing round: annotations=%d over=%s", annotations.size(), roundEnv.processingOver());
-
-        // Collect candidate component types from both annotations
+        generatedDescriptors.clear();
         Set<TypeElement> candidates = collectCandidateComponentTypes(roundEnv);
         note("Found %d candidate component types", candidates.size());
-
         if (!candidates.isEmpty()) {
+            DependencyGraph graph = buildDependencyGraph(candidates);
+            List<TypeElement> ordered = topoSort(graph);
+            note("Topologically sorted component order (size=%d)", ordered.size());
+
             TypeElement componentInterface = getTypeElement(COMPONENT_IFACE);
             TypeMirror componentMirror = componentInterface != null ? componentInterface.asType() : null;
-            for (TypeElement compType : candidates) {
-                note("Processing component type: %s", compType.getQualifiedName());
-                if (componentMirror != null && !processingEnv.getTypeUtils().isAssignable(compType.asType(), componentMirror)) {
-                    note("Skipping %s (not assignable to Component)", compType.getQualifiedName());
-                    continue;
-                }
+            for (TypeElement compType : ordered) {
+                note("Processing component type (topo): %s", compType.getQualifiedName());
                 try {
-                    generateForComponent(compType);
-                    collectedComponents.add(compType.getQualifiedName().toString());
+                    boolean generated = generateForComponent(compType);
+                    if (generated) {
+                        boolean isComponent = componentMirror != null && processingEnv.getTypeUtils().isAssignable(compType.asType(), componentMirror);
+                        if (isComponent) collectedComponents.add(compType.getQualifiedName().toString());
+                    } else {
+                        note("Deferring generation for %s due to unresolved composite dependencies", compType.getQualifiedName());
+                    }
                 } catch (IOException ex) {
-                    error("Failed to generate meta/access for %s: %s", compType.getQualifiedName(), ex.getMessage());
+                    error("Failed to generate meta/handle for %s: %s", compType.getQualifiedName(), ex.getMessage());
                 }
             }
         }
-
-        // Final round: emit central registry once
         if (roundEnv.processingOver() && !collectedComponents.isEmpty()) {
-            try {
-                generateCentralRegistry();
-            } catch (IOException ex) {
-                error("Failed to generate central registry: %s", ex.getMessage());
-            }
+            try { generateCentralRegistry(); } catch (IOException ex) { error("Failed to generate central registry: %s", ex.getMessage()); }
         }
-        // Allow other processors to continue
         return false;
     }
 
@@ -112,23 +110,110 @@ public class ComponentProcessor extends BaseProcessor {
     }
 
     // ---------------------------------------------------------------------
+    // Dependency Graph Construction (Phase 1)
+    // ---------------------------------------------------------------------
+    private static final class DependencyGraph {
+        final Map<String, TypeElement> nodes = new LinkedHashMap<>(); // fqn -> element
+        final Map<String, Set<String>> edges = new LinkedHashMap<>(); // component fqn -> set of dependency fqns
+    }
+
+    private DependencyGraph buildDependencyGraph(Set<TypeElement> candidates) {
+        DependencyGraph graph = new DependencyGraph();
+        for (TypeElement te : candidates) {
+            String fqn = te.getQualifiedName().toString();
+            graph.nodes.put(fqn, te);
+            graph.edges.put(fqn, new LinkedHashSet<>());
+        }
+        for (TypeElement comp : candidates) {
+            String compFqn = comp.getQualifiedName().toString();
+            for (Element e : comp.getEnclosedElements()) {
+                if (e.getKind() != ElementKind.FIELD) continue;
+                if (!hasFieldAnnotation(e)) continue;
+                VariableElement ve = (VariableElement) e;
+                String fieldTypeFqn = ve.asType().toString();
+                if (isPrimitiveOrBoxed(fieldTypeFqn)) continue;
+                if (graph.nodes.containsKey(fieldTypeFqn)) {
+                    // Invert edge: dependency -> component
+                    graph.edges.get(fieldTypeFqn).add(compFqn);
+                    note("Dependency edge (inverted): %s -> %s", fieldTypeFqn, compFqn);
+                }
+            }
+        }
+        return graph;
+    }
+
+    private boolean isPrimitiveOrBoxed(String fqn) {
+        return switch (fqn) {
+            case "byte", "java.lang.Byte",
+                 "short", "java.lang.Short",
+                 "int", "java.lang.Integer",
+                 "long", "java.lang.Long",
+                 "float", "java.lang.Float",
+                 "double", "java.lang.Double",
+                 "boolean", "java.lang.Boolean",
+                 "char", "java.lang.Character" -> true;
+            default -> false;
+        };
+    }
+
+    private List<TypeElement> topoSort(DependencyGraph graph) {
+        // Kahn's algorithm using edges: component -> dependency
+        Map<String, Integer> indegree = new LinkedHashMap<>();
+        for (String node : graph.nodes.keySet()) indegree.put(node, 0);
+        for (Map.Entry<String, Set<String>> e : graph.edges.entrySet()) {
+            for (String dep : e.getValue()) indegree.put(dep, indegree.get(dep) + 1);
+        }
+        Deque<String> queue = new ArrayDeque<>();
+        for (Map.Entry<String, Integer> entry : indegree.entrySet()) {
+            if (entry.getValue() == 0) queue.add(entry.getKey());
+        }
+        List<String> orderedNames = new ArrayList<>();
+        while (!queue.isEmpty()) {
+            String n = queue.removeFirst();
+            orderedNames.add(n);
+            for (String dep : graph.edges.getOrDefault(n, Collections.emptySet())) {
+                int remaining = indegree.compute(dep, (k, v) -> v - 1);
+                if (remaining == 0) queue.add(dep);
+            }
+        }
+        if (orderedNames.size() != graph.nodes.size()) {
+            // Cycle detection: produce diagnostics for involved nodes
+            Set<String> cycleNodes = new LinkedHashSet<>();
+            for (Map.Entry<String, Integer> entry : indegree.entrySet()) if (entry.getValue() > 0) cycleNodes.add(entry.getKey());
+            error("Cycle detected in component dependency graph: %s", cycleNodes);
+            // Fallback: return original insertion order to proceed (graceful degrade)
+            return new ArrayList<>(graph.nodes.values());
+        }
+        List<TypeElement> out = new ArrayList<>(orderedNames.size());
+        for (String name : orderedNames) out.add(graph.nodes.get(name));
+        return out;
+    }
+
+    // ---------------------------------------------------------------------
     // Generation pipeline for one component
     // ---------------------------------------------------------------------
-    private void generateForComponent(TypeElement compType) throws IOException {
+    private boolean generateForComponent(TypeElement compType) throws IOException {
         String pkg = elementUtils.getPackageOf(compType).getQualifiedName().toString();
         String simpleName = compType.getSimpleName().toString();
-
-        // Layout info
+        String compFqn = compType.getQualifiedName().toString();
         ComponentLayout layout = readLayout(compType);
-        // Field list
         List<VariableElement> rawFields = collectAnnotatedFields(compType);
-        List<GeneratedField> genFields = layoutAndSizeFields(layout, rawFields);
+        List<GeneratedField> genFields;
+        List<CompositeFieldInfo> compositeInfos = new ArrayList<>();
+        try {
+            genFields = layoutAndSizeFields(layout, rawFields, compType, compositeInfos);
+        } catch (UnresolvedCompositeException uce) {
+            note("Unresolved composite for %s: %s", compType.getQualifiedName(), uce.getMessage());
+            return false;
+        }
+        compositeFieldMap.put(compFqn, compositeInfos);
         long totalSize = computeTotalSize(layout, genFields);
-
-        // Generate sources
+        int maxAlignment = 1;
+        for (GeneratedField f : genFields) maxAlignment = Math.max(maxAlignment, f.alignment);
+        generatedDescriptors.put(compFqn, new LocalDescriptor(genFields, totalSize, maxAlignment));
         generateMetaSource(pkg, simpleName, compType, genFields, totalSize, layout);
-        generateAccessSource(pkg, simpleName, genFields);
-        generateHandleSource(pkg, simpleName, genFields); // typed handle
+        generateHandleSource(pkg, simpleName, genFields, compType, compositeInfos);
+        return true;
     }
 
     private List<VariableElement> collectAnnotatedFields(TypeElement compType) {
@@ -148,7 +233,12 @@ public class ComponentProcessor extends BaseProcessor {
         return false;
     }
 
-    private List<GeneratedField> layoutAndSizeFields(ComponentLayout layout, List<VariableElement> fields) {
+    // Exception used to defer generation when a composite dependency isn't ready yet
+    private static final class UnresolvedCompositeException extends RuntimeException {
+        UnresolvedCompositeException(String msg) { super(msg); }
+    }
+
+    private List<GeneratedField> layoutAndSizeFields(ComponentLayout layout, List<VariableElement> fields, TypeElement ownerType, List<CompositeFieldInfo> compositeOut) {
         List<VariableElement> work = new ArrayList<>(fields);
         if (layout.type == LayoutType.EXPLICIT) {
             work.sort(Comparator.comparingInt(f -> readField(f).offset));
@@ -159,23 +249,47 @@ public class ComponentProcessor extends BaseProcessor {
         for (VariableElement ve : work) {
             FieldAttrs attrs = readField(ve);
             String name = ve.getSimpleName().toString();
-            FieldType ft = mapFieldType(ve);
-            int alignment = attrs.alignment > 0 ? attrs.alignment : ft.naturalAlignment;
-            long size = attrs.size > 0 ? attrs.size : ft.size;
-
-            long offset;
-            if (layout.type == LayoutType.EXPLICIT && attrs.offset >= 0) {
-                offset = attrs.offset;
-            } else if (layout.type == LayoutType.PADDING) {
-                offset = alignUp(currentOffset, alignment);
-            } else { // SEQUENTIAL default
-                offset = currentOffset;
+            String typeFqn = ve.asType().toString();
+            FieldType primitive = tryMapPrimitive(typeFqn);
+            if (primitive != null) {
+                int alignment = attrs.alignment > 0 ? attrs.alignment : primitive.naturalAlignment;
+                long size = attrs.size > 0 ? attrs.size : primitive.size;
+                long offset;
+                if (layout.type == LayoutType.EXPLICIT && attrs.offset >= 0) {
+                    offset = attrs.offset;
+                } else if (layout.type == LayoutType.PADDING) {
+                    offset = alignUp(currentOffset, alignment);
+                } else {
+                    offset = currentOffset;
+                }
+                out.add(new GeneratedField(name, primitive, offset, size, alignment));
+                currentOffset = offset + size;
+                maxAlignment = Math.max(maxAlignment, alignment);
+                continue;
             }
-            out.add(new GeneratedField(name, ft, offset, size, alignment));
-            currentOffset = offset + size;
-            maxAlignment = Math.max(maxAlignment, alignment);
+            LocalDescriptor sub = generatedDescriptors.get(typeFqn);
+            if (sub == null) {
+                throw new UnresolvedCompositeException("Missing descriptor for composite type '" + typeFqn + "' used in " + ownerType.getQualifiedName());
+            }
+            int compositeAlign = attrs.alignment > 0 ? attrs.alignment : sub.maxAlignment();
+            long compositeSize = attrs.size > 0 ? attrs.size : sub.totalSize();
+            long baseOffset;
+            if (layout.type == LayoutType.EXPLICIT && attrs.offset >= 0) {
+                baseOffset = attrs.offset;
+            } else if (layout.type == LayoutType.PADDING) {
+                baseOffset = alignUp(currentOffset, compositeAlign);
+            } else {
+                baseOffset = currentOffset;
+            }
+            compositeOut.add(new CompositeFieldInfo(name, typeFqn, baseOffset));
+            for (GeneratedField sf : sub.fields()) {
+                String flatName = name + "_" + sf.name;
+                long flatOffset = baseOffset + sf.offset;
+                out.add(new GeneratedField(flatName, sf.ft, flatOffset, sf.size, sf.alignment));
+            }
+            currentOffset = baseOffset + compositeSize;
+            maxAlignment = Math.max(maxAlignment, compositeAlign);
         }
-        // Store max alignment inside layout calculation via size compute method if needed
         return out;
     }
 
@@ -250,138 +364,55 @@ public class ComponentProcessor extends BaseProcessor {
         }
     }
 
-    private void generateAccessSource(String pkg, String simpleName, List<GeneratedField> genFields) throws IOException {
-        String accessName = simpleName + "Access";
-        String fqn = pkg.isEmpty() ? accessName : pkg + "." + accessName;
-        JavaFileObject file = processingEnv.getFiler().createSourceFile(fqn);
-        try (Writer w = file.openWriter()) {
-            if (!pkg.isEmpty()) w.write("package " + pkg + ";\n\n");
-            w.write("@SuppressWarnings(\"all\")\n");
-            w.write("public final class " + accessName + " {\n");
-            w.write("    private " + accessName + "() {}\n\n");
-            w.write("    public static final int FIELD_COUNT = " + genFields.size() + ";\n");
-            for (GeneratedField f : genFields) {
-                String constName = "IDX_" + f.name.toUpperCase(Locale.ROOT);
-                w.write("    public static final int " + constName + " = " + simpleName + "Meta." + constName + ";\n");
-            }
-            w.write("\n");
-            writeGenericAccessors(w);
-            // Named per-field helpers
-            for (GeneratedField f : genFields) {
-                writeNamedAccessor(w, f);
-            }
-            w.write("}\n");
-        }
-    }
-
-    private void writeGenericAccessors(Writer w) throws IOException {
-        w.write("    // Type-safe generic getters\n");
-        w.write("    public static float getFloat(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getFloat(fieldIndex); }\n");
-        w.write("    public static int getInt(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getInt(fieldIndex); }\n");
-        w.write("    public static long getLong(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getLong(fieldIndex); }\n");
-        w.write("    public static double getDouble(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getDouble(fieldIndex); }\n");
-        w.write("    public static boolean getBoolean(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getBoolean(fieldIndex); }\n");
-        w.write("    public static byte getByte(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getByte(fieldIndex); }\n");
-        w.write("    public static short getShort(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getShort(fieldIndex); }\n");
-        w.write("    public static char getChar(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex) { return h.getChar(fieldIndex); }\n\n");
-        w.write("    // Type-safe generic setters\n");
-        w.write("    public static void setFloat(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, float v) { h.setFloat(fieldIndex, v); }\n");
-        w.write("    public static void setInt(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, int v) { h.setInt(fieldIndex, v); }\n");
-        w.write("    public static void setLong(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, long v) { h.setLong(fieldIndex, v); }\n");
-        w.write("    public static void setDouble(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, double v) { h.setDouble(fieldIndex, v); }\n");
-        w.write("    public static void setBoolean(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, boolean v) { h.setBoolean(fieldIndex, v); }\n");
-        w.write("    public static void setByte(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, byte v) { h.setByte(fieldIndex, v); }\n");
-        w.write("    public static void setShort(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, short v) { h.setShort(fieldIndex, v); }\n");
-        w.write("    public static void setChar(com.ethnicthv.ecs.core.components.ComponentHandle h, int fieldIndex, char v) { h.setChar(fieldIndex, v); }\n\n");
-    }
-
-    private void writeNamedAccessor(Writer w, GeneratedField f) throws IOException {
-        String methodSuffix = toCamelCase(f.name);
-        String idxConst = "IDX_" + f.name.toUpperCase(Locale.ROOT);
-        switch (f.ft) {
-            case FLOAT -> {
-                w.write("    public static float get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getFloat(" + idxConst + "); }\n");
-                w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, float v) { h.setFloat(" + idxConst + ", v); }\n");
-            }
-            case INT -> {
-                w.write("    public static int get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getInt(" + idxConst + "); }\n");
-                w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, int v) { h.setInt(" + idxConst + ", v); }\n");
-            }
-            case LONG -> {
-                w.write("    public static long get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getLong(" + idxConst + "); }\n");
-                w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, long v) { h.setLong(" + idxConst + ", v); }\n");
-            }
-            case DOUBLE -> {
-                w.write("    public static double get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getDouble(" + idxConst + "); }\n");
-                w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, double v) { h.setDouble(" + idxConst + ", v); }\n");
-            }
-            case BOOLEAN -> {
-                w.write("    public static boolean get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getBoolean(" + idxConst + "); }\n");
-                w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, boolean v) { h.setBoolean(" + idxConst + ", v); }\n");
-            }
-            case BYTE -> {
-                w.write("    public static byte get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getByte(" + idxConst + "); }\n");
-                w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, byte v) { h.setByte(" + idxConst + ", v); }\n");
-            }
-            case SHORT -> {
-                w.write("    public static short get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getShort(" + idxConst + "); }\n");
-                w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, short v) { h.setShort(" + idxConst + ", v); }\n");
-            }
-            case CHAR -> {
-                w.write("    public static char get" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h) { return h.getChar(" + idxConst + "); }\n");
-                w.write("    public static void set" + methodSuffix + "(com.ethnicthv.ecs.core.components.ComponentHandle h, char v) { h.setChar(" + idxConst + ", v); }\n");
-            }
-        }
-    }
-
-    private void generateHandleSource(String pkg, String simpleName, List<GeneratedField> genFields) throws IOException {
+    private void generateHandleSource(String pkg, String simpleName, List<GeneratedField> genFields, TypeElement compType, List<CompositeFieldInfo> compositeInfos) throws IOException {
         String handleName = simpleName + "Handle";
         String fqn = pkg.isEmpty() ? handleName : pkg + "." + handleName;
-        JavaFileObject file = processingEnv.getFiler().createSourceFile(fqn);
+        JavaFileObject file = processingEnv.getFiler().createSourceFile(fqn, compType);
+        boolean isInterface = compType.getKind() == ElementKind.INTERFACE;
         try (Writer w = file.openWriter()) {
             if (!pkg.isEmpty()) w.write("package " + pkg + ";\n\n");
             w.write("@SuppressWarnings(\"all\")\n");
-            w.write("public final class " + handleName + " {\n");
+            if (isInterface) {
+                w.write("public final class " + handleName + " implements " + compType.getQualifiedName() + ", com.ethnicthv.ecs.core.components.IBindableHandle {\n");
+            } else {
+                w.write("public final class " + handleName + " implements com.ethnicthv.ecs.core.components.IBindableHandle {\n");
+            }
             w.write("  private com.ethnicthv.ecs.core.components.ComponentHandle __internalHandle;\n");
-            w.write("  public void __bind(com.ethnicthv.ecs.core.components.ComponentHandle h) { this.__internalHandle = h; }\n\n");
+            w.write("  private long __baseOffset;\n");
+            w.write("  public void __bind(com.ethnicthv.ecs.core.components.ComponentHandle h) { this.__internalHandle = h; this.__baseOffset = 0L; }\n");
+            w.write("  void __setBaseOffset(long off) { this.__baseOffset = off; }\n");
+            w.write("  public com.ethnicthv.ecs.core.components.ComponentHandle __raw() { return __internalHandle; }\n\n");
             String meta = simpleName + "Meta";
             for (GeneratedField f : genFields) {
                 String prop = toCamelCase(f.name);
                 String idxConst = meta + ".IDX_" + f.name.toUpperCase(Locale.ROOT);
+                String valueLayout;
                 switch (f.ft) {
-                    case FLOAT -> {
-                        w.write("  public float get" + prop + "() { return __internalHandle.getFloat(" + idxConst + "); }\n");
-                        w.write("  public void set" + prop + "(float v) { __internalHandle.setFloat(" + idxConst + ", v); }\n");
-                    }
-                    case INT -> {
-                        w.write("  public int get" + prop + "() { return __internalHandle.getInt(" + idxConst + "); }\n");
-                        w.write("  public void set" + prop + "(int v) { __internalHandle.setInt(" + idxConst + ", v); }\n");
-                    }
-                    case LONG -> {
-                        w.write("  public long get" + prop + "() { return __internalHandle.getLong(" + idxConst + "); }\n");
-                        w.write("  public void set" + prop + "(long v) { __internalHandle.setLong(" + idxConst + ", v); }\n");
-                    }
-                    case DOUBLE -> {
-                        w.write("  public double get" + prop + "() { return __internalHandle.getDouble(" + idxConst + "); }\n");
-                        w.write("  public void set" + prop + "(double v) { __internalHandle.setDouble(" + idxConst + ", v); }\n");
-                    }
-                    case BOOLEAN -> {
-                        w.write("  public boolean is" + prop + "() { return __internalHandle.getBoolean(" + idxConst + "); }\n");
-                        w.write("  public void set" + prop + "(boolean v) { __internalHandle.setBoolean(" + idxConst + ", v); }\n");
-                    }
-                    case BYTE -> {
-                        w.write("  public byte get" + prop + "() { return __internalHandle.getByte(" + idxConst + "); }\n");
-                        w.write("  public void set" + prop + "(byte v) { __internalHandle.setByte(" + idxConst + ", v); }\n");
-                    }
-                    case SHORT -> {
-                        w.write("  public short get" + prop + "() { return __internalHandle.getShort(" + idxConst + "); }\n");
-                        w.write("  public void set" + prop + "(short v) { __internalHandle.setShort(" + idxConst + ", v); }\n");
-                    }
-                    case CHAR -> {
-                        w.write("  public char get" + prop + "() { return __internalHandle.getChar(" + idxConst + "); }\n");
-                        w.write("  public void set" + prop + "(char v) { __internalHandle.setChar(" + idxConst + ", v); }\n");
-                    }
+                    case FLOAT -> valueLayout = "JAVA_FLOAT";
+                    case INT -> valueLayout = "JAVA_INT";
+                    case LONG -> valueLayout = "JAVA_LONG";
+                    case DOUBLE -> valueLayout = "JAVA_DOUBLE";
+                    case BOOLEAN -> valueLayout = "JAVA_BOOLEAN";
+                    case BYTE -> valueLayout = "JAVA_BYTE";
+                    case SHORT -> valueLayout = "JAVA_SHORT";
+                    case CHAR -> valueLayout = "JAVA_CHAR";
+                    default -> valueLayout = "JAVA_INT";
                 }
+                // absolute offset based on meta field offset
+                w.write("  public " + javaTypeFor(f.ft) + " get" + prop + "() { ");
+                w.write("var __seg = __internalHandle.getSegment(); long __off = this.__baseOffset + " + meta + ".DESCRIPTOR.getField(" + idxConst + ").offset(); ");
+                w.write("return __seg.get(java.lang.foreign.ValueLayout." + valueLayout + ", __off); }\n");
+                w.write("  public void set" + prop + "(" + javaTypeFor(f.ft) + " v) { ");
+                w.write("var __seg = __internalHandle.getSegment(); long __off = this.__baseOffset + " + meta + ".DESCRIPTOR.getField(" + idxConst + ").offset(); ");
+                w.write("__seg.set(java.lang.foreign.ValueLayout." + valueLayout + ", __off, v); }\n");
+            }
+            // Slice composite getters pass base offset to child handle
+            for (CompositeFieldInfo c : compositeInfos) {
+                String compSimple = c.typeFqn.substring(c.typeFqn.lastIndexOf('.') + 1);
+                String handleClass = compSimple + "Handle";
+                String methodName = "get" + toCamelCase(c.originalName);
+                w.write("  public " + handleClass + " " + methodName + "() {\n");
+                w.write("    " + handleClass + " h = new " + handleClass + "(); h.__bind(this.__internalHandle); h.__setBaseOffset(this.__baseOffset + " + c.baseOffset + "L); return h;\n  }\n");
             }
             w.write("}\n");
         }
@@ -454,9 +485,8 @@ public class ComponentProcessor extends BaseProcessor {
         return new FieldAttrs(0, -1, 0);
     }
 
-    private FieldType mapFieldType(VariableElement ve) {
-        String tn = ve.asType().toString();
-        return switch (tn) {
+    private FieldType tryMapPrimitive(String typeName) {
+        return switch (typeName) {
             case "byte", "java.lang.Byte" -> FieldType.BYTE;
             case "short", "java.lang.Short" -> FieldType.SHORT;
             case "int", "java.lang.Integer" -> FieldType.INT;
@@ -465,10 +495,25 @@ public class ComponentProcessor extends BaseProcessor {
             case "double", "java.lang.Double" -> FieldType.DOUBLE;
             case "boolean", "java.lang.Boolean" -> FieldType.BOOLEAN;
             case "char", "java.lang.Character" -> FieldType.CHAR;
-            default -> {
-                error("Unsupported field type %s in %s", tn, ve.getEnclosingElement().getSimpleName());
-                yield FieldType.INT; // fallback to continue processing
-            }
+            default -> null;
+        };
+    }
+
+    private enum FieldType {
+        BYTE(1,1,"BYTE"), SHORT(2,2,"SHORT"), INT(4,4,"INT"), LONG(8,8,"LONG"), FLOAT(4,4,"FLOAT"), DOUBLE(8,8,"DOUBLE"), BOOLEAN(1,1,"BOOLEAN"), CHAR(2,2,"CHAR");
+        final long size; final int naturalAlignment; final String enumName;
+        FieldType(long sz, int na, String en) { this.size = sz; this.naturalAlignment = na; this.enumName = en; }
+    }
+    private String javaTypeFor(FieldType ft) {
+        return switch (ft) {
+            case BYTE -> "byte";
+            case SHORT -> "short";
+            case INT -> "int";
+            case LONG -> "long";
+            case FLOAT -> "float";
+            case DOUBLE -> "double";
+            case BOOLEAN -> "boolean";
+            case CHAR -> "char";
         };
     }
 
@@ -502,9 +547,14 @@ public class ComponentProcessor extends BaseProcessor {
         final String name; final FieldType ft; final long offset; final long size; final int alignment;
         GeneratedField(String n, FieldType ft, long off, long sz, int a) { this.name = n; this.ft = ft; this.offset = off; this.size = sz; this.alignment = a; }
     }
-    private enum FieldType {
-        BYTE(1,1,"BYTE"), SHORT(2,2,"SHORT"), INT(4,4,"INT"), LONG(8,8,"LONG"), FLOAT(4,4,"FLOAT"), DOUBLE(8,8,"DOUBLE"), BOOLEAN(1,1,"BOOLEAN"), CHAR(2,2,"CHAR");
-        final long size; final int naturalAlignment; final String enumName;
-        FieldType(long sz, int na, String en) { this.size = sz; this.naturalAlignment = na; this.enumName = en; }
+    // New structure to remember composite fields for slice handle generation
+    private static final class CompositeFieldInfo {
+        final String originalName; // e.g., position
+        final String typeFqn;      // e.g., com.foo.PositionComponent
+        final long baseOffset;     // offset where composite starts
+        CompositeFieldInfo(String originalName, String typeFqn, long baseOffset) {this.originalName = originalName; this.typeFqn = typeFqn; this.baseOffset = baseOffset; }
     }
+    private record LocalDescriptor(List<GeneratedField> fields, long totalSize, int maxAlignment) {}
+    // Map component FQN -> list of composite field infos (filled during layout)
+    private final Map<String, List<CompositeFieldInfo>> compositeFieldMap = new HashMap<>();
 }

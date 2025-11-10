@@ -1,0 +1,72 @@
+Benchmark                                                  (entities)  (entityCount)   Mode  Cnt    Score     Error   Units
+ComponentManagerBenchmark.throughput_EntitiesPerSecond            N/A         100000  thrpt    5  365.304 ± 468.679   ops/s
+ComponentManagerBenchmark.throughput_EntitiesPerSecond            N/A        1000000  thrpt    5   28.048 ±   0.280   ops/s
+MixedModeRunnerBenchmark.runParallel                             1000            N/A  thrpt   25   27.069 ±   0.450  ops/ms
+MixedModeRunnerBenchmark.runParallel                            10000            N/A  thrpt   25    3.986 ±   0.631  ops/ms
+MixedModeRunnerBenchmark.runParallel                            50000            N/A  thrpt   25    1.805 ±   0.313  ops/ms
+MixedModeRunnerBenchmark.runSequential                           1000            N/A  thrpt   25   16.239 ±   0.117  ops/ms
+MixedModeRunnerBenchmark.runSequential                          10000            N/A  thrpt   25    1.543 ±   0.028  ops/ms
+MixedModeRunnerBenchmark.runSequential                          50000            N/A  thrpt   25    0.271 ±   0.004  ops/ms
+BatchStructuralMoveBenchmark.add_batch                            N/A           1000   avgt    5    0.141 ±   0.031   ms/op
+BatchStructuralMoveBenchmark.add_batch                            N/A          10000   avgt    5    1.581 ±   0.240   ms/op
+BatchStructuralMoveBenchmark.add_batch                            N/A         100000   avgt    5   21.660 ±   9.952   ms/op
+BatchStructuralMoveBenchmark.add_perEntity                        N/A           1000   avgt    5    0.327 ±   0.103   ms/op
+BatchStructuralMoveBenchmark.add_perEntity                        N/A          10000   avgt    5    2.987 ±   0.654   ms/op
+BatchStructuralMoveBenchmark.add_perEntity                        N/A         100000   avgt    5   38.835 ±  24.791   ms/op
+BatchStructuralMoveBenchmark.remove_batch                         N/A           1000   avgt    5    0.137 ±   0.035   ms/op
+BatchStructuralMoveBenchmark.remove_batch                         N/A          10000   avgt    5    1.974 ±   0.223   ms/op
+BatchStructuralMoveBenchmark.remove_batch                         N/A         100000   avgt    5   23.627 ±  10.807   ms/op
+BatchStructuralMoveBenchmark.remove_perEntity                     N/A           1000   avgt    5    0.321 ±   0.128   ms/op
+BatchStructuralMoveBenchmark.remove_perEntity                     N/A          10000   avgt    5    2.884 ±   0.619   ms/op
+BatchStructuralMoveBenchmark.remove_perEntity                     N/A         100000   avgt    5   42.027 ±  31.804   ms/op
+ComponentManagerBenchmark.archetypeMigration                      N/A            N/A   avgt    5    3.017 ±   0.927   ms/op
+ComponentManagerBenchmark.componentAddition                       N/A             10   avgt    5    0.041 ±   0.001   ms/op
+ComponentManagerBenchmark.componentAddition                       N/A            100   avgt    5    0.073 ±   0.016   ms/op
+ComponentManagerBenchmark.componentAddition                       N/A           1000   avgt    5    0.362 ±   0.026   ms/op
+ComponentManagerBenchmark.componentAddition                       N/A          10000   avgt    5    3.319 ±   0.283   ms/op
+ComponentManagerBenchmark.componentAddition                       N/A         100000   avgt    5   32.703 ±   8.041   ms/op
+ComponentManagerBenchmark.componentAddition                       N/A        1000000   avgt    5  355.799 ± 311.672   ms/op
+ComponentManagerBenchmark.componentRegistration                   N/A            N/A   avgt    5    0.002 ±   0.001   ms/op
+ComponentManagerBenchmark.entityCreation                          N/A             10   avgt    5    0.006 ±   0.001   ms/op
+ComponentManagerBenchmark.entityCreation                          N/A            100   avgt    5    0.017 ±   0.001   ms/op
+ComponentManagerBenchmark.entityCreation                          N/A           1000   avgt    5    0.136 ±   0.008   ms/op
+ComponentManagerBenchmark.entityCreation                          N/A          10000   avgt    5    1.332 ±   0.106   ms/op
+ComponentManagerBenchmark.entityCreation                          N/A         100000   avgt    5   19.126 ±   5.196   ms/op
+ComponentManagerBenchmark.entityCreation                          N/A        1000000   avgt    5  196.395 ± 130.782   ms/op
+ComponentManagerBenchmark.handlePooling_BoundHandle               N/A            N/A   avgt    5   ≈ 10⁻⁴             ms/op
+ComponentManagerBenchmark.handlePooling_CreateRelease             N/A            N/A   avgt    5   ≈ 10⁻⁴             ms/op
+ComponentManagerBenchmark.largeScale_MultipleQueries              N/A             10   avgt    5    0.001 ±   0.001   ms/op
+ComponentManagerBenchmark.largeScale_MultipleQueries              N/A            100   avgt    5    0.004 ±   0.008   ms/op
+ComponentManagerBenchmark.largeScale_MultipleQueries              N/A           1000   avgt    5    0.036 ±   0.043   ms/op
+ComponentManagerBenchmark.largeScale_MultipleQueries              N/A          10000   avgt    5    0.360 ±   0.379   ms/op
+ComponentManagerBenchmark.largeScale_MultipleQueries              N/A         100000   avgt    5    3.315 ±   3.731   ms/op
+ComponentManagerBenchmark.largeScale_MultipleQueries              N/A        1000000   avgt    5   47.994 ±  13.739   ms/op
+ComponentManagerBenchmark.largeScale_ParallelQuery                N/A             10   avgt    5    0.002 ±   0.001   ms/op
+ComponentManagerBenchmark.largeScale_ParallelQuery                N/A            100   avgt    5    0.005 ±   0.001   ms/op
+ComponentManagerBenchmark.largeScale_ParallelQuery                N/A           1000   avgt    5    0.025 ±   0.039   ms/op
+ComponentManagerBenchmark.largeScale_ParallelQuery                N/A          10000   avgt    5    0.152 ±   0.038   ms/op
+ComponentManagerBenchmark.largeScale_ParallelQuery                N/A         100000   avgt    5    0.746 ±   0.368   ms/op
+ComponentManagerBenchmark.largeScale_ParallelQuery                N/A        1000000   avgt    5    6.329 ±  10.155   ms/op
+ComponentManagerBenchmark.largeScale_SequentialQuery              N/A             10   avgt    5   ≈ 10⁻³             ms/op
+ComponentManagerBenchmark.largeScale_SequentialQuery              N/A            100   avgt    5    0.002 ±   0.003   ms/op
+ComponentManagerBenchmark.largeScale_SequentialQuery              N/A           1000   avgt    5    0.022 ±   0.022   ms/op
+ComponentManagerBenchmark.largeScale_SequentialQuery              N/A          10000   avgt    5    0.150 ±   0.070   ms/op
+ComponentManagerBenchmark.largeScale_SequentialQuery              N/A         100000   avgt    5    2.303 ±   2.891   ms/op
+ComponentManagerBenchmark.largeScale_SequentialQuery              N/A        1000000   avgt    5   27.607 ±  11.944   ms/op
+ComponentManagerBenchmark.memoryPressure_CreateAndDestroy         N/A           1000   avgt    5    0.483 ±   0.094   ms/op
+ComponentManagerBenchmark.memoryPressure_CreateAndDestroy         N/A          10000   avgt    5    4.474 ±   1.643   ms/op
+ComponentManagerBenchmark.memoryPressure_CreateAndDestroy         N/A         100000   avgt    5   54.852 ±  24.137   ms/op
+ComponentManagerBenchmark.queryIteration_ReadWrite                N/A             10   avgt    5   ≈ 10⁻⁴             ms/op
+ComponentManagerBenchmark.queryIteration_ReadWrite                N/A            100   avgt    5    0.001 ±   0.001   ms/op
+ComponentManagerBenchmark.queryIteration_ReadWrite                N/A           1000   avgt    5    0.015 ±   0.018   ms/op
+ComponentManagerBenchmark.queryIteration_ReadWrite                N/A          10000   avgt    5    0.175 ±   0.287   ms/op
+ComponentManagerBenchmark.queryIteration_ReadWrite                N/A         100000   avgt    5    1.568 ±   2.014   ms/op
+ComponentManagerBenchmark.queryIteration_ReadWrite                N/A        1000000   avgt    5   15.369 ±  16.312   ms/op
+ComponentManagerBenchmark.queryIteration_Update                   N/A             10   avgt    5   ≈ 10⁻⁴             ms/op
+ComponentManagerBenchmark.queryIteration_Update                   N/A            100   avgt    5    0.002 ±   0.002   ms/op
+ComponentManagerBenchmark.queryIteration_Update                   N/A           1000   avgt    5    0.016 ±   0.019   ms/op
+ComponentManagerBenchmark.queryIteration_Update                   N/A          10000   avgt    5    0.165 ±   0.226   ms/op
+ComponentManagerBenchmark.queryIteration_Update                   N/A         100000   avgt    5    1.515 ±   1.724   ms/op
+ComponentManagerBenchmark.queryIteration_Update                   N/A        1000000   avgt    5   15.876 ±  19.754   ms/op
+ComponentManagerBenchmark.throughput_MaximalIteration             N/A         100000   avgt    5    1.139 ±   0.647   ms/op
+ComponentManagerBenchmark.throughput_MaximalIteration             N/A        1000000   avgt    5   18.583 ±   7.184   ms/op

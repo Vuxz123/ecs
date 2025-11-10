@@ -8,7 +8,12 @@ import com.ethnicthv.ecs.core.components.SharedComponentStore;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -528,50 +533,333 @@ public final class ArchetypeWorld implements AutoCloseable {
         return sharedStore.findIndex(value);
     }
 
+    // ============ Batch API ============
+    public static final class EntityBatch {
+        public final int[] entityIds;
+        public final int size;
+        private EntityBatch(int[] ids) { this.entityIds = ids; this.size = ids.length; }
+        public static EntityBatch of(int... ids) { return new EntityBatch(Arrays.copyOf(ids, ids.length)); }
+    }
+
+    public void setSharedComponent(EntityBatch batch, Object sharedValue) {
+        if (batch == null || batch.size == 0) return;
+        Objects.requireNonNull(sharedValue, "sharedValue");
+        Class<?> type = sharedValue.getClass();
+        Integer typeId = componentTypeIds.get(type);
+        if (typeId == null) throw new IllegalArgumentException("Shared component type not registered: " + type.getName());
+        ComponentDescriptor desc = componentManager.getDescriptor(type);
+        if (desc == null || desc.getKind() != ComponentDescriptor.ComponentKind.SHARED_MANAGED) {
+            throw new IllegalArgumentException("Type is not a @Shared @Managed Component type: " + type.getName());
+        }
+        int ticket = sharedStore.getOrAddSharedIndex(sharedValue);
+        // Group by old group
+        Map<ChunkGroup, List<Integer>> byOldGroup = new HashMap<>();
+        for (int eid : batch.entityIds) {
+            EntityRecord rec = entityRecords.get(eid);
+            if (rec == null) continue;
+            ChunkGroup oldGroup = rec.archetype.getChunkGroup(rec.sharedKey);
+            if (oldGroup == null) continue;
+            byOldGroup.computeIfAbsent(oldGroup, k -> new ArrayList<>()).add(eid);
+        }
+        for (Map.Entry<ChunkGroup, List<Integer>> entry : byOldGroup.entrySet()) {
+            List<Integer> eids = entry.getValue();
+            if (eids.isEmpty()) continue;
+            ChunkGroup oldGroup = entry.getKey();
+            EntityRecord first = entityRecords.get(eids.get(0));
+            Archetype archetype = first.archetype;
+            int pos = archetype.getSharedManagedIndex(typeId);
+            // If archetype doesn't contain the shared type, fallback per-entity (mask extend) to keep logic simple now
+            if (pos < 0) {
+                for (int eid : eids) setSharedComponent(eid, sharedValue);
+                continue;
+            }
+            // Build eids needing change and compute their respective newKey
+            Map<SharedValueKey, List<Integer>> byTargetKey = new HashMap<>();
+            for (int eid : eids) {
+                EntityRecord rec = entityRecords.get(eid);
+                if (rec == null) continue;
+                SharedValueKey oldKey = rec.sharedKey;
+                int managedCount = archetype.getSharedManagedTypeIds().length;
+                int[] managedIdx;
+                long[] unmanagedVals;
+                if (oldKey != null && oldKey.managedSharedIndices() != null && oldKey.managedSharedIndices().length == managedCount) {
+                    managedIdx = oldKey.managedSharedIndices().clone();
+                } else {
+                    managedIdx = new int[managedCount];
+                    java.util.Arrays.fill(managedIdx, -1);
+                    if (oldKey != null && oldKey.managedSharedIndices() != null) {
+                        int copyLen = Math.min(managedIdx.length, oldKey.managedSharedIndices().length);
+                        System.arraycopy(oldKey.managedSharedIndices(), 0, managedIdx, 0, copyLen);
+                    }
+                }
+                unmanagedVals = (oldKey != null ? oldKey.unmanagedSharedValues() : null);
+                int prev = managedIdx[pos];
+                if (prev == ticket) continue; // unchanged
+                managedIdx[pos] = ticket;
+                SharedValueKey newKey = new SharedValueKey(managedIdx, unmanagedVals);
+                byTargetKey.computeIfAbsent(newKey, k -> new ArrayList<>()).add(eid);
+            }
+            for (Map.Entry<SharedValueKey, List<Integer>> g : byTargetKey.entrySet()) {
+                SharedValueKey newKey = g.getKey();
+                ChunkGroup newGroup = archetype.getOrCreateChunkGroup(newKey);
+                if (newGroup == oldGroup) continue;
+                batchMoveShared(archetype, oldGroup, newGroup, g.getValue(), first.mask, first.mask, newKey);
+            }
+        }
+    }
+
     // ============ Internal Methods ============
 
     private void moveEntityToArchetype(int entityId, EntityRecord oldRecord, ComponentMask oldMask, ComponentMask newMask, SharedValueKey newSharedKey) {
         Archetype newArchetype = archetypeManager.getOrCreateArchetype(newMask);
         ChunkGroup newGroup = newArchetype.getOrCreateChunkGroup(newSharedKey);
-        ArchetypeChunk.ChunkLocation newLocation = newGroup.addEntity(entityId);
-
-        // Obtain old group (may be null if not present any more)
+        // Determine old group from current record
         ChunkGroup oldGroup = oldRecord.archetype.getChunkGroup(oldRecord.sharedKey);
-        ArchetypeChunk oldChunk = (oldGroup != null) ? oldGroup.getChunk(oldRecord.location.chunkIndex) : null;
-        ArchetypeChunk newChunk = newGroup.getChunk(newLocation.chunkIndex);
 
-        // Copy unmanaged instance data intersection using group-specific chunks
-        int[] typeIds = newMask.toComponentIdArray();
-        for (int componentTypeId : typeIds) {
-            if (oldMask.has(componentTypeId)) {
-                int oldIdx = oldRecord.archetype.indexOfComponentType(componentTypeId);
-                int newIdx = newArchetype.indexOfComponentType(componentTypeId);
-                if (oldIdx >= 0 && newIdx >= 0 && oldChunk != null) {
-                    var oldData = oldChunk.getComponentData(oldIdx, oldRecord.location.indexInChunk);
-                    if (oldData != null) {
-                        newChunk.setComponentData(newIdx, newLocation.indexInChunk, oldData);
+        // Acquire locks in stable order to avoid deadlocks; handle null oldGroup
+        if (oldGroup == null || oldGroup == newGroup) {
+            newGroup.getResizeLock().lock();
+            try {
+                // Allocate in target
+                ArchetypeChunk.ChunkLocation newLocation = newGroup.addEntity(entityId);
+                ArchetypeChunk newChunk = newGroup.getChunk(newLocation.chunkIndex);
+                // Copy unmanaged data intersection (oldGroup may be null; skip copies if so)
+                ArchetypeChunk oldChunk = null;
+                if (oldGroup != null) {
+                    oldChunk = oldGroup.getChunk(oldRecord.location.chunkIndex);
+                }
+                int[] typeIds = newMask.toComponentIdArray();
+                if (oldChunk != null) {
+                    for (int componentTypeId : typeIds) {
+                        if (oldMask.has(componentTypeId)) {
+                            int oldIdx = oldRecord.archetype.indexOfComponentType(componentTypeId);
+                            int newIdx = newArchetype.indexOfComponentType(componentTypeId);
+                            if (oldIdx >= 0 && newIdx >= 0) {
+                                var oldData = oldChunk.getComponentData(oldIdx, oldRecord.location.indexInChunk);
+                                if (oldData != null) newChunk.setComponentData(newIdx, newLocation.indexInChunk, oldData);
+                            }
+                        }
+                    }
+                    // Transfer managed tickets intersection
+                    int[] oldManaged = oldRecord.archetype.getManagedTypeIds();
+                    int[] newManaged = newArchetype.getManagedTypeIds();
+                    if (oldManaged != null && newManaged != null && oldManaged.length > 0 && newManaged.length > 0) {
+                        for (int tid : oldManaged) {
+                            int oldMIdx = oldRecord.archetype.getManagedTypeIndex(tid);
+                            int newMIdx = newArchetype.getManagedTypeIndex(tid);
+                            if (oldMIdx >= 0 && newMIdx >= 0) {
+                                int ticket = oldChunk.getManagedTicket(oldMIdx, oldRecord.location.indexInChunk);
+                                if (ticket >= 0) newChunk.setManagedTicket(newMIdx, newLocation.indexInChunk, ticket);
+                            }
+                        }
+                    }
+                    // Remove from old group now that copy is done
+                    oldGroup.removeEntity(oldRecord.location);
+                }
+                // Update record
+                entityRecords.put(entityId, new EntityRecord(newArchetype, newLocation, newMask, newSharedKey));
+            } finally {
+                newGroup.getResizeLock().unlock();
+            }
+            return;
+        }
+
+        // Two distinct groups: lock both in identity order
+        ChunkGroup first = oldGroup;
+        ChunkGroup second = newGroup;
+        if (System.identityHashCode(first) > System.identityHashCode(second)) { first = newGroup; second = oldGroup; }
+        first.getResizeLock().lock();
+        try {
+            second.getResizeLock().lock();
+            try {
+                // Allocate in target
+                ArchetypeChunk.ChunkLocation newLocation = newGroup.addEntity(entityId);
+                ArchetypeChunk oldChunk = oldGroup.getChunk(oldRecord.location.chunkIndex);
+                ArchetypeChunk newChunk = newGroup.getChunk(newLocation.chunkIndex);
+                // Copy unmanaged instance data intersection
+                int[] typeIds = newMask.toComponentIdArray();
+                for (int componentTypeId : typeIds) {
+                    if (oldMask.has(componentTypeId)) {
+                        int oldIdx = oldRecord.archetype.indexOfComponentType(componentTypeId);
+                        int newIdx = newArchetype.indexOfComponentType(componentTypeId);
+                        if (oldIdx >= 0 && newIdx >= 0) {
+                            var oldData = oldChunk.getComponentData(oldIdx, oldRecord.location.indexInChunk);
+                            if (oldData != null) newChunk.setComponentData(newIdx, newLocation.indexInChunk, oldData);
+                        }
                     }
                 }
-            }
-        }
-
-        // Transfer managed instance tickets intersection using group-specific chunks
-        int[] oldManaged = oldRecord.archetype.getManagedTypeIds();
-        int[] newManaged = newArchetype.getManagedTypeIds();
-        if (oldManaged != null && newManaged != null && oldManaged.length > 0 && newManaged.length > 0 && oldChunk != null && newChunk != null) {
-            for (int tid : oldManaged) {
-                int oldMIdx = oldRecord.archetype.getManagedTypeIndex(tid);
-                int newMIdx = newArchetype.getManagedTypeIndex(tid);
-                if (oldMIdx >= 0 && newMIdx >= 0) {
-                    int ticket = oldChunk.getManagedTicket(oldMIdx, oldRecord.location.indexInChunk);
-                    if (ticket >= 0) newChunk.setManagedTicket(newMIdx, newLocation.indexInChunk, ticket);
+                // Transfer managed instance tickets intersection
+                int[] oldManaged = oldRecord.archetype.getManagedTypeIds();
+                int[] newManaged = newArchetype.getManagedTypeIds();
+                if (oldManaged != null && newManaged != null && oldManaged.length > 0 && newManaged.length > 0) {
+                    for (int tid : oldManaged) {
+                        int oldMIdx = oldRecord.archetype.getManagedTypeIndex(tid);
+                        int newMIdx = newArchetype.getManagedTypeIndex(tid);
+                        if (oldMIdx >= 0 && newMIdx >= 0) {
+                            int ticket = oldChunk.getManagedTicket(oldMIdx, oldRecord.location.indexInChunk);
+                            if (ticket >= 0) newChunk.setManagedTicket(newMIdx, newLocation.indexInChunk, ticket);
+                        }
+                    }
                 }
+                // Remove from old group and update record
+                oldGroup.removeEntity(oldRecord.location);
+                entityRecords.put(entityId, new EntityRecord(newArchetype, newLocation, newMask, newSharedKey));
+            } finally {
+                second.getResizeLock().unlock();
             }
+        } finally {
+            first.getResizeLock().unlock();
         }
+    }
 
-        // Remove from old group and update record
-        if (oldGroup != null) oldGroup.removeEntity(oldRecord.location);
-        entityRecords.put(entityId, new EntityRecord(newArchetype, newLocation, newMask, newSharedKey));
+    private void batchMoveShared(Archetype archetype, ChunkGroup oldGroup, ChunkGroup newGroup, List<Integer> eids, ComponentMask oldMask, ComponentMask newMask, SharedValueKey newSharedKey) {
+        if (eids == null || eids.isEmpty()) return;
+        ChunkGroup first = oldGroup;
+        ChunkGroup second = newGroup;
+        if (System.identityHashCode(first) > System.identityHashCode(second)) { first = newGroup; second = oldGroup; }
+        first.getResizeLock().lock();
+        try {
+            if (second != first) second.getResizeLock().lock();
+            try {
+                int n = eids.size();
+                int[] idsArr = new int[n];
+                for (int i = 0; i < n; i++) idsArr[i] = eids.get(i);
+                ArchetypeChunk.ChunkLocation[] newLocs = newGroup.addEntities(idsArr);
+                ArchetypeChunk.ChunkLocation[] oldLocs = new ArchetypeChunk.ChunkLocation[n];
+                for (int i = 0; i < n; i++) oldLocs[i] = entityRecords.get(idsArr[i]).location;
+
+                // Precompute unmanaged intersection index pairs
+                int[] compTypeIds = archetype.getComponentTypeIds();
+                int maxC = compTypeIds != null ? compTypeIds.length : 0;
+                int[] compOldIdx = new int[maxC];
+                int[] compNewIdx = new int[maxC];
+                int cCount = 0;
+                for (int t = 0; t < maxC; t++) {
+                    int compTypeId = compTypeIds[t];
+                    if (!oldMask.has(compTypeId) || !newMask.has(compTypeId)) continue;
+                    int oi = archetype.indexOfComponentType(compTypeId);
+                    int ni = oi; // same archetype
+                    if (oi >= 0 && ni >= 0) { compOldIdx[cCount] = oi; compNewIdx[cCount] = ni; cCount++; }
+                }
+                // Precompute managed intersection pairs
+                int[] managedTypeIds = archetype.getManagedTypeIds();
+                int maxM = managedTypeIds != null ? managedTypeIds.length : 0;
+                int[] manIdx = new int[maxM]; // same index on both sides for same archetype
+                int mCount = 0;
+                for (int t = 0; t < maxM; t++) {
+                    int tid = managedTypeIds[t];
+                    if (!oldMask.has(tid) || !newMask.has(tid)) continue;
+                    int mi = archetype.getManagedTypeIndex(tid);
+                    if (mi >= 0) { manIdx[mCount] = mi; mCount++; }
+                }
+
+                // Entity-first copy using precomputed indices
+                for (int i = 0; i < n; i++) {
+                    ArchetypeChunk oldChunk = oldGroup.getChunk(oldLocs[i].chunkIndex);
+                    ArchetypeChunk newChunk = newGroup.getChunk(newLocs[i].chunkIndex);
+                    int oldSlot = oldLocs[i].indexInChunk;
+                    int newSlot = newLocs[i].indexInChunk;
+                    for (int k = 0; k < cCount; k++) {
+                        MemorySegment src = oldChunk.getComponentData(compOldIdx[k], oldSlot);
+                        newChunk.setComponentData(compNewIdx[k], newSlot, src);
+                    }
+                    for (int k = 0; k < mCount; k++) {
+                        int mi = manIdx[k];
+                        int ticket = oldChunk.getManagedTicket(mi, oldSlot);
+                        if (ticket >= 0) newChunk.setManagedTicket(mi, newSlot, ticket);
+                    }
+                }
+
+                oldGroup.removeEntities(oldLocs);
+                for (int i = 0; i < n; i++) entityRecords.put(idsArr[i], new EntityRecord(archetype, newLocs[i], newMask, newSharedKey));
+            } finally {
+                if (second != first) second.getResizeLock().unlock();
+            }
+        } finally {
+            first.getResizeLock().unlock();
+        }
+    }
+
+    private void batchMoveStructural(Archetype oldArch, Archetype newArch, ChunkGroup oldGroup, ChunkGroup newGroup, List<Integer> eids, ComponentMask oldMask, ComponentMask newMask, SharedValueKey key) {
+        if (eids.isEmpty()) return;
+        ChunkGroup first = oldGroup;
+        ChunkGroup second = newGroup;
+        if (System.identityHashCode(first) > System.identityHashCode(second)) { first = newGroup; second = oldGroup; }
+        first.getResizeLock().lock();
+        try {
+            if (second != first) second.getResizeLock().lock();
+            try {
+                int n = eids.size();
+                int[] ids = new int[n];
+                for (int i = 0; i < n; i++) ids[i] = eids.get(i);
+                ArchetypeChunk.ChunkLocation[] newLocs = newGroup.addEntities(ids);
+                ArchetypeChunk.ChunkLocation[] oldLocs = new ArchetypeChunk.ChunkLocation[n];
+                for (int i = 0; i < n; i++) oldLocs[i] = entityRecords.get(ids[i]).location;
+
+                // Precompute unmanaged intersection index pairs between oldArch and newArch
+                int[] compTypeIds = newArch.getComponentTypeIds();
+                int maxC = compTypeIds != null ? compTypeIds.length : 0;
+                int[] compOldIdx = new int[maxC];
+                int[] compNewIdx = new int[maxC];
+                int cCount = 0;
+                for (int t = 0; t < maxC; t++) {
+                    int compTypeId = compTypeIds[t];
+                    if (!oldMask.has(compTypeId) || !newMask.has(compTypeId)) continue;
+                    int oi = oldArch.indexOfComponentType(compTypeId);
+                    int ni = newArch.indexOfComponentType(compTypeId);
+                    if (oi >= 0 && ni >= 0) { compOldIdx[cCount] = oi; compNewIdx[cCount] = ni; cCount++; }
+                }
+                // Precompute managed intersection and removals
+                int[] oldManagedIds = oldArch.getManagedTypeIds();
+                int[] newManagedIds = newArch.getManagedTypeIds();
+                int maxMi = oldManagedIds != null ? oldManagedIds.length : 0;
+                int[] manOldIdx = new int[maxMi];
+                int[] manNewIdx = new int[maxMi];
+                int miCount = 0;
+                int[] removeOldIdx = new int[maxMi];
+                int rCount = 0;
+                if (oldManagedIds != null) {
+                    for (int tid : oldManagedIds) {
+                        int oi = oldArch.getManagedTypeIndex(tid);
+                        boolean inOld = oldMask.has(tid);
+                        boolean inNew = newMask.has(tid);
+                        if (inOld && inNew) {
+                            int ni = newArch.getManagedTypeIndex(tid);
+                            if (oi >= 0 && ni >= 0) { manOldIdx[miCount] = oi; manNewIdx[miCount] = ni; miCount++; }
+                        } else if (inOld && !inNew) {
+                            if (oi >= 0) { removeOldIdx[rCount] = oi; rCount++; }
+                        }
+                    }
+                }
+
+                // Entity-first copy and releases using precomputed indices
+                for (int i = 0; i < n; i++) {
+                    ArchetypeChunk oldChunk = oldGroup.getChunk(oldLocs[i].chunkIndex);
+                    ArchetypeChunk newChunk = newGroup.getChunk(newLocs[i].chunkIndex);
+                    int oldSlot = oldLocs[i].indexInChunk;
+                    int newSlot = newLocs[i].indexInChunk;
+                    for (int k = 0; k < cCount; k++) {
+                        MemorySegment src = oldChunk.getComponentData(compOldIdx[k], oldSlot);
+                        newChunk.setComponentData(compNewIdx[k], newSlot, src);
+                    }
+                    for (int k = 0; k < miCount; k++) {
+                        int ticket = oldChunk.getManagedTicket(manOldIdx[k], oldSlot);
+                        if (ticket >= 0) newChunk.setManagedTicket(manNewIdx[k], newSlot, ticket);
+                    }
+                    for (int k = 0; k < rCount; k++) {
+                        int ticket = oldChunk.getManagedTicket(removeOldIdx[k], oldSlot);
+                        if (ticket >= 0) managedStore.release(ticket);
+                    }
+                }
+
+                oldGroup.removeEntities(oldLocs);
+                for (int i = 0; i < n; i++) entityRecords.put(ids[i], new EntityRecord(newArch, newLocs[i], newMask, key));
+            } finally {
+                if (second != first) second.getResizeLock().unlock();
+            }
+        } finally {
+            first.getResizeLock().unlock();
+        }
     }
 
     // ============ Internal Records ============
@@ -579,4 +867,74 @@ public final class ArchetypeWorld implements AutoCloseable {
     record EntityRecord(Archetype archetype, ArchetypeChunk.ChunkLocation location, ComponentMask mask, SharedValueKey sharedKey) {}
 
     public record ComponentMetadata(int id, Class<?> type, long size) {}
+
+    public void addComponents(EntityBatch batch, Class<?> componentClass) {
+        if (batch == null || batch.size == 0) return;
+        addComponents(batch, new Class<?>[]{componentClass});
+    }
+
+    public void removeComponents(EntityBatch batch, Class<?> componentClass) {
+        if (batch == null || batch.size == 0) return;
+        removeComponents(batch, new Class<?>[]{componentClass});
+    }
+
+    // New: multi-component batch add/remove/mutate
+    public void addComponents(EntityBatch batch, Class<?>... componentClasses) {
+        if (batch == null || batch.size == 0 || componentClasses == null || componentClasses.length == 0) return;
+        mutateComponents(batch, componentClasses, new Class<?>[0]);
+    }
+
+    public void removeComponents(EntityBatch batch, Class<?>... componentClasses) {
+        if (batch == null || batch.size == 0 || componentClasses == null || componentClasses.length == 0) return;
+        mutateComponents(batch, new Class<?>[0], componentClasses);
+    }
+
+    public void mutateComponents(EntityBatch batch, Class<?>[] addClasses, Class<?>[] removeClasses) {
+        if (batch == null || batch.size == 0) return;
+        // Pre-resolve type ids
+        int addCount = addClasses != null ? addClasses.length : 0;
+        int remCount = removeClasses != null ? removeClasses.length : 0;
+        int[] addTypeIds = new int[addCount];
+        int[] remTypeIds = new int[remCount];
+        for (int i = 0; i < addCount; i++) {
+            Integer tid = componentTypeIds.get(addClasses[i]);
+            if (tid == null) throw new IllegalArgumentException("Component type not registered: " + addClasses[i].getName());
+            addTypeIds[i] = tid;
+        }
+        for (int i = 0; i < remCount; i++) {
+            Integer tid = componentTypeIds.get(removeClasses[i]);
+            if (tid == null) throw new IllegalArgumentException("Component type not registered: " + removeClasses[i].getName());
+            remTypeIds[i] = tid;
+        }
+        // Group by old archetype
+        Map<Archetype, List<Integer>> byArchetype = new HashMap<>();
+        for (int eid : batch.entityIds) {
+            EntityRecord rec = entityRecords.get(eid);
+            if (rec == null) continue;
+            byArchetype.computeIfAbsent(rec.archetype, k -> new ArrayList<>()).add(eid);
+        }
+        for (Map.Entry<Archetype, List<Integer>> entry : byArchetype.entrySet()) {
+            Archetype oldArch = entry.getKey();
+            List<Integer> eids = entry.getValue();
+            if (eids.isEmpty()) continue;
+            // Build new mask once for this old archetype
+            ComponentMask newMask = oldArch.getMask();
+            for (int tid : addTypeIds) newMask = newMask.set(tid);
+            for (int tid : remTypeIds) newMask = newMask.clear(tid);
+            if (newMask.equals(oldArch.getMask())) continue; // nothing to do
+            Archetype newArch = archetypeManager.getOrCreateArchetype(newMask);
+            // Partition by shared key to keep batch moves localized
+            Map<SharedValueKey, List<Integer>> byShared = new HashMap<>();
+            for (int eid : eids) {
+                EntityRecord rec = entityRecords.get(eid);
+                byShared.computeIfAbsent(rec.sharedKey, k -> new ArrayList<>()).add(eid);
+            }
+            for (Map.Entry<SharedValueKey, List<Integer>> sg : byShared.entrySet()) {
+                SharedValueKey key = sg.getKey();
+                ChunkGroup oldGroup = oldArch.getChunkGroup(key);
+                ChunkGroup newGroup = newArch.getOrCreateChunkGroup(key);
+                batchMoveStructural(oldArch, newArch, oldGroup, newGroup, sg.getValue(), oldArch.getMask(), newMask, key);
+            }
+        }
+    }
 }

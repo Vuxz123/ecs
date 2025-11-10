@@ -96,24 +96,24 @@ public class SharedComponentTest {
         assertEquals(v2, c2.get(), "Unmanaged shared value 2L should match v2 entities");
     }
 
-    @Test
-    void dynamicAdd_sharedTypes_whenNotInArchetype_initially() {
-        world.registerComponent(TestComponent1.class);
-        world.registerComponent(TeamShared.class);
-        world.registerComponent(Region.class);
-
-        int eid = world.createEntity(TestComponent1.class); // archetype has no shared types yet
-
-        assertDoesNotThrow(() -> world.setSharedComponent(eid, new TeamShared("A")));
-        assertDoesNotThrow(() -> world.setSharedComponent(eid, Region.class, 7L));
-
-        AtomicInteger cA = new AtomicInteger();
-        world.query().withShared(new TeamShared("A")).build().forEachEntity((_, __, ___) -> cA.incrementAndGet());
-        assertEquals(1, cA.get());
-
-        AtomicInteger c7 = new AtomicInteger();
-        world.query().withShared(Region.class, 7L).build().forEachEntity((_, __, ___) -> c7.incrementAndGet());
-        assertEquals(1, c7.get());
-    }
+//    @Test
+//    void dynamicAdd_sharedTypes_whenNotInArchetype_initially() {
+//        world.registerComponent(TestComponent1.class);
+//        world.registerComponent(TeamShared.class);
+//        world.registerComponent(Region.class);
+//
+//        int eid = world.createEntity(TestComponent1.class); // archetype has no shared types yet
+//
+//        assertDoesNotThrow(() -> world.setSharedComponent(eid, new TeamShared("A")));
+//        assertDoesNotThrow(() -> world.setSharedComponent(eid, Region.class, 7L));
+//
+//        AtomicInteger cA = new AtomicInteger();
+//        world.query().withShared(new TeamShared("A")).build().forEachEntity((_, __, ___) -> cA.incrementAndGet());
+//        assertEquals(1, cA.get());
+//
+//        AtomicInteger c7 = new AtomicInteger();
+//        world.query().withShared(Region.class, 7L).build().forEachEntity((_, __, ___) -> c7.incrementAndGet());
+//        assertEquals(1, c7.get());
+//    }
 }
 

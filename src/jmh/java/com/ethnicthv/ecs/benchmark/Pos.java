@@ -1,4 +1,4 @@
-package com.ethnicthv.ecs.bench;
+package com.ethnicthv.ecs.benchmark;
 
 import com.ethnicthv.ecs.core.components.Component;
 

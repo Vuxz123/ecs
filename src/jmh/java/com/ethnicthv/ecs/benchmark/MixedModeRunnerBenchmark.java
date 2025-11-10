@@ -1,7 +1,6 @@
-package com.ethnicthv.ecs.bench;
+package com.ethnicthv.ecs.benchmark;
 
 import com.ethnicthv.ecs.core.api.archetype.IGeneratedQuery;
-import com.ethnicthv.ecs.core.api.archetype.IQuery;
 import com.ethnicthv.ecs.core.archetype.ArchetypeWorld;
 import com.ethnicthv.ecs.core.components.ComponentHandle;
 import com.ethnicthv.ecs.core.components.ComponentManager;

@@ -7,24 +7,18 @@ import java.lang.foreign.Arena;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * ChunkGroup encapsulates chunk management logic for an Archetype.
- * It manages chunk arrays, provisioning, and allocation/freeing of entity slots.
+ * Simplified provisioning logic: only uses resizeLock (no spin / atomic boolean coordination).
  */
 public final class ChunkGroup {
     private volatile ArchetypeChunk[] chunks;
     private final AtomicInteger chunkCount = new AtomicInteger(0);
     private final ReentrantLock resizeLock = new ReentrantLock();
     private final ConcurrentLinkedQueue<Integer> availableChunks = new ConcurrentLinkedQueue<>();
-    private final AtomicInteger availableCount = new AtomicInteger(0);
-    private final AtomicBoolean provisioning = new AtomicBoolean(false);
-
-    private static final int PROVISION_THRESHOLD = 2;
-    private static final int SPIN_WAIT_ITERATIONS = 32;
 
     private final ComponentDescriptor[] descriptors;
     private final long[] elementSizes;
@@ -44,35 +38,31 @@ public final class ChunkGroup {
         chunkCount.set(1);
         if (first.tryMarkQueued()) {
             this.availableChunks.add(0);
-            this.availableCount.incrementAndGet();
         }
     }
 
+    // --- New optimistic addEntity implementation ---
     public ArchetypeChunk.ChunkLocation addEntity(int entityId) {
-        while (true) {
-            ArchetypeChunk.ChunkLocation loc = tryFastPathAllocate(entityId);
+        // 1. Fast path attempt without locking
+        ArchetypeChunk.ChunkLocation loc = tryFastPathAllocate(entityId);
+        if (loc != null) return loc;
+
+        // 2. Slow path: acquire real lock, double-check, then create
+        resizeLock.lock();
+        try {
+            // 3. Double-check after acquiring lock (another thread may have inserted a chunk)
+            loc = tryFastPathAllocate(entityId);
             if (loc != null) return loc;
-            if (provisioning.compareAndSet(false, true)) {
-                try {
-                    loc = tryFastPathAllocate(entityId);
-                    if (loc != null) return loc;
-                    return createChunkAndAllocate(entityId);
-                } finally {
-                    provisioning.set(false);
-                }
-            }
-            for (int i = 0; i < SPIN_WAIT_ITERATIONS; i++) {
-                loc = tryFastPathAllocate(entityId);
-                if (loc != null) return loc;
-                Thread.onSpinWait();
-            }
+            // 4. Still no space: create new chunk and allocate
+            return createChunkAndAllocate(entityId);
+        } finally {
+            resizeLock.unlock();
         }
     }
 
     private ArchetypeChunk.ChunkLocation tryFastPathAllocate(int entityId) {
         Integer idxChunk;
-        while ((idxChunk = availableChunks.poll()) != null) {
-            availableCount.decrementAndGet();
+        while ((idxChunk = availableChunks.poll()) != null) { // dequeue a chunk with (expected) free slots
             ArchetypeChunk[] snap = this.chunks;
             int count = this.chunkCount.get();
             if (idxChunk < 0 || idxChunk >= count) continue;
@@ -81,24 +71,22 @@ public final class ChunkGroup {
             chunk.markDequeued();
             int slot = chunk.allocateSlot(entityId);
             if (slot >= 0) {
-                maybeProvision();
-                if (chunk.hasFree() && chunk.tryMarkQueued()) {
+                if (chunk.hasFree() && chunk.tryMarkQueued()) { // requeue if still space
                     availableChunks.offer(idxChunk);
-                    availableCount.incrementAndGet();
                 }
                 return new ArchetypeChunk.ChunkLocation(idxChunk, slot);
             }
+            // If allocation failed (race filled chunk), just loop to next available
         }
         return null;
     }
 
     private ArchetypeChunk.ChunkLocation createChunkAndAllocate(int entityId) {
         ArchetypeChunk newChunk = new ArchetypeChunk(descriptors, elementSizes, entitiesPerChunk, arena, managedTypeCount);
-        int newIndex = appendChunk(newChunk);
+        int newIndex = appendChunk(newChunk); // appendChunk already uses resizeLock (reentrant safe)
         int slot = newChunk.allocateSlot(entityId);
         if (newChunk.hasFree() && newChunk.tryMarkQueued()) {
             availableChunks.offer(newIndex);
-            availableCount.incrementAndGet();
         }
         return new ArchetypeChunk.ChunkLocation(newIndex, slot);
     }
@@ -125,21 +113,6 @@ public final class ChunkGroup {
         }
     }
 
-    public void maybeProvision() {
-        if (availableCount.get() < PROVISION_THRESHOLD && provisioning.compareAndSet(false, true)) {
-            try {
-                ArchetypeChunk extra = new ArchetypeChunk(descriptors, elementSizes, entitiesPerChunk, arena, managedTypeCount);
-                int id = appendChunk(extra);
-                if (extra.tryMarkQueued()) {
-                    availableChunks.offer(id);
-                    availableCount.incrementAndGet();
-                }
-            } finally {
-                provisioning.set(false);
-            }
-        }
-    }
-
     public void removeEntity(ArchetypeChunk.ChunkLocation location) {
         int idx = location.chunkIndex;
         ArchetypeChunk[] snap = this.chunks;
@@ -149,7 +122,6 @@ public final class ChunkGroup {
         chunk.freeSlot(location.indexInChunk);
         if (chunk.hasFree() && chunk.tryMarkQueued()) {
             availableChunks.offer(idx);
-            availableCount.incrementAndGet();
         }
     }
 
@@ -193,4 +165,87 @@ public final class ChunkGroup {
             }
         }
     }
+
+    // --- Batch APIs ---
+    public ArchetypeChunk.ChunkLocation[] addEntities(int[] entityIds) {
+        if (entityIds == null || entityIds.length == 0) return new ArchetypeChunk.ChunkLocation[0];
+        ArchetypeChunk.ChunkLocation[] out = new ArchetypeChunk.ChunkLocation[entityIds.length];
+        int need = entityIds.length;
+        int produced = 0;
+        // Consume available queued chunks, allocate as many as possible from each before moving on
+        Integer idxChunk;
+        while (produced < need && (idxChunk = availableChunks.poll()) != null) {
+            ArchetypeChunk[] snap = this.chunks;
+            int count = this.chunkCount.get();
+            if (idxChunk < 0 || idxChunk >= count) continue;
+            ArchetypeChunk chunk = snap[idxChunk];
+            if (chunk == null) continue;
+            chunk.markDequeued();
+            while (produced < need) {
+                int slot = chunk.allocateSlot(entityIds[produced]);
+                if (slot < 0) break;
+                out[produced] = new ArchetypeChunk.ChunkLocation(idxChunk, slot);
+                produced++;
+            }
+            if (chunk.hasFree() && chunk.tryMarkQueued()) {
+                availableChunks.offer(idxChunk);
+            }
+        }
+        if (produced == need) return out;
+        // Slow path: lock and either consume any newly queued chunks or create new chunks
+        resizeLock.lock();
+        try {
+            // Double-check: consume any available after acquiring lock
+            while (produced < need && (idxChunk = availableChunks.poll()) != null) {
+                ArchetypeChunk[] snap = this.chunks;
+                int count = this.chunkCount.get();
+                if (idxChunk < 0 || idxChunk >= count) continue;
+                ArchetypeChunk chunk = snap[idxChunk];
+                if (chunk == null) continue;
+                chunk.markDequeued();
+                while (produced < need) {
+                    int slot = chunk.allocateSlot(entityIds[produced]);
+                    if (slot < 0) break;
+                    out[produced] = new ArchetypeChunk.ChunkLocation(idxChunk, slot);
+                    produced++;
+                }
+                if (chunk.hasFree() && chunk.tryMarkQueued()) availableChunks.offer(idxChunk);
+            }
+            // Create new chunks until satisfied
+            while (produced < need) {
+                ArchetypeChunk newChunk = new ArchetypeChunk(descriptors, elementSizes, entitiesPerChunk, arena, managedTypeCount);
+                int newIndex = appendChunk(newChunk); // appendChunk is reentrant with resizeLock
+                int toAlloc = Math.min(need - produced, entitiesPerChunk);
+                // Fresh chunk yields contiguous indices [0..toAlloc-1]
+                for (int i = 0; i < toAlloc; i++) {
+                    int slot = newChunk.allocateSlot(entityIds[produced]);
+                    out[produced] = new ArchetypeChunk.ChunkLocation(newIndex, slot);
+                    produced++;
+                }
+                if (newChunk.hasFree() && newChunk.tryMarkQueued()) availableChunks.offer(newIndex);
+            }
+        } finally {
+            resizeLock.unlock();
+        }
+        return out;
+    }
+
+    public void removeEntities(ArchetypeChunk.ChunkLocation[] locations) {
+        if (locations == null || locations.length == 0) return;
+        // Free slots; afterwards enqueue chunks that still have free space
+        // Group by chunk to reduce repeated offers; but offering multiple times is harmless due to tryMarkQueued
+        for (ArchetypeChunk.ChunkLocation loc : locations) {
+            if (loc == null) continue;
+            int idx = loc.chunkIndex;
+            ArchetypeChunk[] snap = this.chunks;
+            int count = this.chunkCount.get();
+            if (idx < 0 || idx >= count) continue;
+            ArchetypeChunk chunk = snap[idx];
+            if (chunk == null) continue;
+            chunk.freeSlot(loc.indexInChunk);
+            if (chunk.hasFree() && chunk.tryMarkQueued()) availableChunks.offer(idx);
+        }
+    }
+
+    public ReentrantLock getResizeLock() { return resizeLock; }
 }

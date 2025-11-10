@@ -133,6 +133,7 @@ public final class ArchetypeChunk implements IArchetypeChunk {
             // already free; ignore double free
             return;
         }
+        size.decrementAndGet();
         // clear occupancy bit (iteration won't visit this index after this point)
         clearBit(index);
         // push index onto free list
@@ -140,7 +141,6 @@ public final class ArchetypeChunk implements IArchetypeChunk {
             int head = freeHead.get();
             nextFree[index] = head;
             if (freeHead.compareAndSet(head, index)) {
-                size.decrementAndGet();
                 return;
             }
             // retry on contention
@@ -302,5 +302,12 @@ public final class ArchetypeChunk implements IArchetypeChunk {
             throw new IndexOutOfBoundsException("elementIndex out of range");
         }
         managedComponentIndexArrays[managedTypeIndex][elementIndex] = ticket;
+    }
+
+    public MemorySegment getComponentArray(int componentIndex) {
+        if (componentIndex < 0 || componentIndex >= componentArrays.length) {
+            throw new IndexOutOfBoundsException("componentIndex out of range");
+        }
+        return componentArrays[componentIndex];
     }
 }

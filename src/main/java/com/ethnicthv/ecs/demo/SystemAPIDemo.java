@@ -151,21 +151,21 @@ public class SystemAPIDemo {
         private void query(
                 @Id Integer entityId,
                 @Component(type = VelocityComponent.class) VelocityComponentHandle velocityHandle,
-                @Component(type = PositionComponent.class) ComponentHandle locationHandle
+                @Component(type = PositionComponent.class) PositionComponentHandle locationHandle
         ) {
 
             float vx = velocityHandle.getVx();
             float vy = velocityHandle.getVy();
 
-            float x = PositionComponentAccess.getX(locationHandle);
-            float y = PositionComponentAccess.getY(locationHandle);
+            float x = locationHandle.getX();
+            float y = locationHandle.getY();
 
             x += vx * 0.1f;
             y += vy * 0.1f;
 
             // Write back
-            PositionComponentAccess.setX(locationHandle, x);
-            PositionComponentAccess.setY(locationHandle, y);
+            locationHandle.setX(x);
+            locationHandle.setY(y);
 
             if (firstEntityId == Integer.MAX_VALUE) {
                 System.out.println("Logging movement of first entity only for demo purposes...");
@@ -197,14 +197,14 @@ public class SystemAPIDemo {
                 with = HealthComponent.class
         )
         private void query(
-                @Component(type = HealthComponent.class) ComponentHandle healthHandle
+                @Component(type = HealthComponent.class) HealthComponentHandle healthHandle
         ) {
-            int health = HealthComponentAccess.getCurrentHealth(healthHandle);
-            int maxHealth = HealthComponentAccess.getMaxHealth(healthHandle);
+            int health = healthHandle.getCurrentHealth();
+            int maxHealth = healthHandle.getMaxHealth();
 
             if (health < maxHealth) {
                 health = Math.min(maxHealth, health + (int) (10 * 0.1f));
-                HealthComponentAccess.setCurrentHealth(healthHandle, health);
+                healthHandle.setCurrentHealth(health);
             }
         }
     }
@@ -222,19 +222,19 @@ public class SystemAPIDemo {
                 with = { PositionComponent.class, HealthComponent.class }
         )
         private void query(
-                @Component(type = PositionComponent.class) ComponentHandle positionHandle,
+                @Component(type = PositionComponent.class) PositionComponentHandle positionHandle,
                 NameComponent nameComponent
         ) {
             // Update position
-            float x = PositionComponentAccess.getX(positionHandle);
-            float y = PositionComponentAccess.getY(positionHandle);
+            float x = positionHandle.getX();
+            float y = positionHandle.getY();
             x += 1.0f;
             y += 1.0f;
-            PositionComponentAccess.setX(positionHandle, x);
-            PositionComponentAccess.setY(positionHandle, y);
+            positionHandle.setX(x);
+            positionHandle.setY(y);
 
             // log name from managed component
-            //System.out.println("Entity Name: " + nameComponent.name);
+            System.out.println("Entity Name: " + nameComponent.name);
         }
     }
 
@@ -258,16 +258,16 @@ public class SystemAPIDemo {
         )
         private void query(
                 @Id int entityId,
-                @Component(type = PositionComponent.class) ComponentHandle pos,
+                @Component(type = PositionComponent.class) PositionComponentHandle pos,
                 @Component(type = VelocityComponent.class) VelocityComponentHandle vel,
                 @Component(type = IndexComponent.class) IndexComponentHandle index
         ) {
-            float x = PositionComponentAccess.getX(pos);
-            float y = PositionComponentAccess.getY(pos);
+            float x = pos.getX();
+            float y = pos.getY();
             x += vel.getVx() * 0.05f;
             y += vel.getVy() * 0.05f;
-            PositionComponentAccess.setX(pos, x);
-            PositionComponentAccess.setY(pos, y);
+            pos.setX(x);
+            pos.setY(y);
 
             if (index.getIndex() % 2 == 1) {
                 System.out.println("Team A Entity " + entityId + "with Index " + index.getIndex() + " moved to (" + x + ", " + y + ")");

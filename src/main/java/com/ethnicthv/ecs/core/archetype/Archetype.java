@@ -155,6 +155,8 @@ public final class Archetype implements IArchetype {
 
     public int getEntitiesPerChunk() { return entitiesPerChunk; }
 
+    public long[] getElementSizes() { return componentElementSizes; }
+
     /**
      * Return a snapshot list of chunks. Order is physical array order.
      */
