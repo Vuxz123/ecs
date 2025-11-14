@@ -4,6 +4,6 @@ import com.ethnicthv.ecs.core.components.Component;
 
 @Component.Layout(Component.LayoutType.SEQUENTIAL)
 public final class TestComponent1 implements Component {
-    @Field(offset = 0, size = 1, alignment = 1)
+    @Component.Field(offset = 0, size = 4, alignment = 4)
     int value;
 }

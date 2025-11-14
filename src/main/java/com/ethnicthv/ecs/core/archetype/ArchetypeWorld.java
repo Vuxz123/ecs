@@ -1,19 +1,11 @@
 package com.ethnicthv.ecs.core.archetype;
 
 import com.ethnicthv.ecs.core.api.archetype.IQueryBuilder;
-import com.ethnicthv.ecs.core.components.ComponentDescriptor;
-import com.ethnicthv.ecs.core.components.ComponentManager;
-import com.ethnicthv.ecs.core.components.ManagedComponentStore;
-import com.ethnicthv.ecs.core.components.SharedComponentStore;
+import com.ethnicthv.ecs.core.components.*;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -27,11 +19,8 @@ public final class ArchetypeWorld implements AutoCloseable {
     private final ComponentManager componentManager;
     private final ArchetypeManager archetypeManager;
     private final ConcurrentHashMap<Integer, EntityRecord> entityRecords; // entityId -> location in archetype
-    private final ConcurrentHashMap<Class<?>, Integer> componentTypeIds;
-    private final ConcurrentHashMap<Integer, ComponentMetadata> componentMetadata;
     private final Arena arena;
     private final AtomicInteger nextEntityId = new AtomicInteger(1);
-    private final AtomicInteger nextComponentTypeId = new AtomicInteger(0);
     // New: global store for managed components
     private final ManagedComponentStore managedStore = new ManagedComponentStore();
     // New: store for managed shared components (de-duplicated)
@@ -41,25 +30,15 @@ public final class ArchetypeWorld implements AutoCloseable {
         this.arena = Arena.ofShared();
         this.componentManager = componentManager;
         this.entityRecords = new ConcurrentHashMap<>();
-        this.componentTypeIds = new ConcurrentHashMap<>();
-        this.componentMetadata = new ConcurrentHashMap<>();
         // Initialize ArchetypeManager after metadata map is ready
         this.archetypeManager = new ArchetypeManager(arena, componentManager, this::getComponentMetadata);
     }
 
     /**
-     * Register a component type via ComponentManager
+     * Register a component type via ComponentManager (SSOT for IDs).
      */
     public <T> int registerComponent(Class<T> componentClass) {
-        return componentTypeIds.computeIfAbsent(componentClass, cls -> {
-            int tid = componentManager.registerComponent(cls);
-            // store metadata from descriptor
-            ComponentDescriptor desc = componentManager.getDescriptor(cls);
-            componentMetadata.put(tid, new ComponentMetadata(tid, cls, desc.getTotalSize()));
-            // update nextComponentTypeId to reflect assigned id atomically
-            nextComponentTypeId.updateAndGet(prev -> Math.max(prev, tid + 1));
-            return tid;
-        });
+        return componentManager.registerComponent(componentClass);
     }
 
     /**
@@ -134,7 +113,7 @@ public final class ArchetypeWorld implements AutoCloseable {
         // 2. Build the component mask
         ComponentMask mask = new ComponentMask();
         for (Class<?> componentClass : componentClasses) {
-            Integer componentTypeId = componentTypeIds.get(componentClass);
+            Integer componentTypeId = getComponentTypeId(componentClass);
             if (componentTypeId == null) {
                 throw new IllegalArgumentException("Component type " + componentClass.getName() + " is not registered.");
             }
@@ -177,7 +156,7 @@ public final class ArchetypeWorld implements AutoCloseable {
             throw new IllegalArgumentException("Entity " + entityId + " does not exist");
         }
 
-        Integer componentTypeId = componentTypeIds.get(componentClass);
+        Integer componentTypeId = getComponentTypeId(componentClass);
         if (componentTypeId == null) {
             throw new IllegalArgumentException("Component type " + componentClass + " not registered");
         }
@@ -211,7 +190,7 @@ public final class ArchetypeWorld implements AutoCloseable {
             throw new IllegalArgumentException("Entity " + entityId + " does not exist");
         }
 
-        Integer componentTypeId = componentTypeIds.get(componentClass);
+        Integer componentTypeId = getComponentTypeId(componentClass);
         if (componentTypeId == null) {
             throw new IllegalArgumentException("Component type " + componentClass + " not registered");
         }
@@ -249,7 +228,7 @@ public final class ArchetypeWorld implements AutoCloseable {
             throw new IllegalArgumentException("Entity " + entityId + " does not exist");
         }
 
-        Integer componentTypeId = componentTypeIds.get(componentClass);
+        Integer componentTypeId = getComponentTypeId(componentClass);
         if (componentTypeId == null || !record.mask.has(componentTypeId)) {
             return; // Component doesn't exist on this entity
         }
@@ -286,7 +265,7 @@ public final class ArchetypeWorld implements AutoCloseable {
             return null;
         }
 
-        Integer componentTypeId = componentTypeIds.get(componentClass);
+        Integer componentTypeId = getComponentTypeId(componentClass);
         if (componentTypeId == null || !record.mask.has(componentTypeId)) {
             return null;
         }
@@ -304,7 +283,7 @@ public final class ArchetypeWorld implements AutoCloseable {
             return false;
         }
 
-        Integer componentTypeId = componentTypeIds.get(componentClass);
+        Integer componentTypeId = getComponentTypeId(componentClass);
         return componentTypeId != null && record.mask.has(componentTypeId);
     }
 
@@ -365,17 +344,23 @@ public final class ArchetypeWorld implements AutoCloseable {
     }
 
     /**
-     * Get component type ID
+     * Get component type ID via ComponentManager (SSOT).
      */
     public Integer getComponentTypeId(Class<?> componentClass) {
-        return componentTypeIds.get(componentClass);
+        return componentManager.getTypeId(componentClass);
     }
 
     /**
-     * Get component metadata
+     * Get component metadata using ComponentManager as SSOT.
+     * Fast path: resolve id -> descriptor in O(1) and derive class/size from it.
      */
     public ComponentMetadata getComponentMetadata(int componentTypeId) {
-        return componentMetadata.get(componentTypeId);
+        ComponentDescriptor desc = componentManager.getDescriptor(componentTypeId);
+        if (desc == null) {
+            throw new IllegalStateException("Không tìm thấy Descriptor cho component typeId: " + componentTypeId);
+        }
+        Class<?> componentClass = desc.getComponentClass();
+        return new ComponentMetadata(componentTypeId, componentClass, desc.getTotalSize());
     }
 
     /**
@@ -396,7 +381,7 @@ public final class ArchetypeWorld implements AutoCloseable {
     public <T> T getManagedComponent(int entityId, Class<T> componentClass) {
         EntityRecord record = entityRecords.get(entityId);
         if (record == null) return null;
-        Integer typeId = componentTypeIds.get(componentClass);
+        Integer typeId = getComponentTypeId(componentClass);
         if (typeId == null || !record.mask.has(typeId)) return null;
         ComponentDescriptor desc = componentManager.getDescriptor(componentClass);
         if (desc == null || !desc.isManaged()) return null;
@@ -418,7 +403,7 @@ public final class ArchetypeWorld implements AutoCloseable {
     public <T> void setManagedComponent(int entityId, T newInstance) {
         if (newInstance == null) throw new IllegalArgumentException("newInstance must not be null");
         Class<?> componentClass = newInstance.getClass();
-        Integer typeId = componentTypeIds.get(componentClass);
+        Integer typeId = getComponentTypeId(componentClass);
         if (typeId == null) throw new IllegalArgumentException("Component type not registered: " + componentClass.getName());
         ComponentDescriptor desc = componentManager.getDescriptor(componentClass);
         if (desc == null || !desc.isManaged()) {
@@ -447,7 +432,7 @@ public final class ArchetypeWorld implements AutoCloseable {
     public <T> void setSharedComponent(int entityId, T managedValue) {
         if (managedValue == null) throw new IllegalArgumentException("managedValue must not be null");
         Class<?> type = managedValue.getClass();
-        Integer typeId = componentTypeIds.get(type);
+        Integer typeId = getComponentTypeId(type);
         if (typeId == null) throw new IllegalArgumentException("Shared component type not registered: " + type.getName());
         ComponentDescriptor desc = componentManager.getDescriptor(type);
         if (desc == null || desc.getKind() != ComponentDescriptor.ComponentKind.SHARED_MANAGED) {
@@ -490,7 +475,7 @@ public final class ArchetypeWorld implements AutoCloseable {
     }
 
     public void setSharedComponent(int entityId, Class<?> unmanagedSharedType, long value) {
-        Integer typeId = componentTypeIds.get(unmanagedSharedType);
+        Integer typeId = getComponentTypeId(unmanagedSharedType);
         if (typeId == null) throw new IllegalArgumentException("Shared component type not registered: " + unmanagedSharedType.getName());
         ComponentDescriptor desc = componentManager.getDescriptor(unmanagedSharedType);
         if (desc == null || desc.getKind() != ComponentDescriptor.ComponentKind.SHARED_UNMANAGED) {
@@ -545,7 +530,7 @@ public final class ArchetypeWorld implements AutoCloseable {
         if (batch == null || batch.size == 0) return;
         Objects.requireNonNull(sharedValue, "sharedValue");
         Class<?> type = sharedValue.getClass();
-        Integer typeId = componentTypeIds.get(type);
+        Integer typeId = getComponentTypeId(type);
         if (typeId == null) throw new IllegalArgumentException("Shared component type not registered: " + type.getName());
         ComponentDescriptor desc = componentManager.getDescriptor(type);
         if (desc == null || desc.getKind() != ComponentDescriptor.ComponentKind.SHARED_MANAGED) {
@@ -897,12 +882,12 @@ public final class ArchetypeWorld implements AutoCloseable {
         int[] addTypeIds = new int[addCount];
         int[] remTypeIds = new int[remCount];
         for (int i = 0; i < addCount; i++) {
-            Integer tid = componentTypeIds.get(addClasses[i]);
+            Integer tid = getComponentTypeId(addClasses[i]);
             if (tid == null) throw new IllegalArgumentException("Component type not registered: " + addClasses[i].getName());
             addTypeIds[i] = tid;
         }
         for (int i = 0; i < remCount; i++) {
-            Integer tid = componentTypeIds.get(removeClasses[i]);
+            Integer tid = getComponentTypeId(removeClasses[i]);
             if (tid == null) throw new IllegalArgumentException("Component type not registered: " + removeClasses[i].getName());
             remTypeIds[i] = tid;
         }
@@ -935,6 +920,95 @@ public final class ArchetypeWorld implements AutoCloseable {
                 ChunkGroup newGroup = newArch.getOrCreateChunkGroup(key);
                 batchMoveStructural(oldArch, newArch, oldGroup, newGroup, sg.getValue(), oldArch.getMask(), newMask, key);
             }
+        }
+    }
+
+    // Expose arena for ECB lane allocations (package-private for now)
+    Arena getArena() {
+        return arena;
+    }
+
+    /**
+     * Thêm một component (unmanaged) vào entity và khởi tạo nó ngay lập tức
+     * bằng cách sử dụng một initializer lambda type-safe.
+     * Đây là phương thức zero-copy, zero-allocation (ngoại trừ việc di chuyển archetype).
+     */
+    @SuppressWarnings("unchecked")
+    public <THandle extends IBindableHandle> void addComponent(
+        int entityId,
+        Class<?> componentClass,
+        java.util.function.Consumer<THandle> initializer
+    ) {
+        // 1. Lấy record hiện tại
+        EntityRecord record = entityRecords.get(entityId);
+        if (record == null) {
+            throw new IllegalArgumentException("Entity " + entityId + " does not exist");
+        }
+        Integer componentTypeId = getComponentTypeId(componentClass);
+        if (componentTypeId == null) {
+            throw new IllegalArgumentException("Component type " + componentClass.getName() + " not registered");
+        }
+        ComponentDescriptor desc = componentManager.getDescriptor(componentClass);
+        if (desc != null && desc.isManaged()) {
+            throw new IllegalArgumentException("addComponent(entityId, Class, Consumer) không hỗ trợ managed component " + componentClass.getName());
+        }
+        if (record.mask.has(componentTypeId)) {
+            // Entity đã có component này, chỉ cần chạy initializer
+            initializeComponent(entityId, record, componentClass, initializer);
+            return;
+        }
+
+        // 2. Di chuyển entity (Structural Change)
+        ComponentMask newMask = record.mask.set(componentTypeId);
+        moveEntityToArchetype(entityId, record, record.mask, newMask, record.sharedKey);
+
+        // 3. Lấy record MỚI (sau khi di chuyển)
+        EntityRecord newRecord = entityRecords.get(entityId);
+
+        // 4. Chạy logic khởi tạo
+        initializeComponent(entityId, newRecord, componentClass, initializer);
+    }
+
+    @SuppressWarnings("unchecked")
+    private <THandle extends IBindableHandle> void initializeComponent(
+        int entityId,
+        EntityRecord record,
+        Class<?> componentClass,
+        java.util.function.Consumer<THandle> initializer
+    ) {
+        // 1. Chuẩn bị các handle từ pool
+        ComponentHandle rawHandle = componentManager.acquireHandle();
+        IBindableHandle typedHandle = componentManager.acquireTypedHandle(componentClass);
+
+        try {
+            // 2. Tìm slot bộ nhớ (memory slot) THỰC TẾ của component
+            ChunkGroup group = record.archetype.getChunkGroup(record.sharedKey);
+            if (group == null) throw new IllegalStateException("ChunkGroup not found");
+
+            ArchetypeChunk chunk = group.getChunk(record.location.chunkIndex);
+            Integer typeId = getComponentTypeId(componentClass);
+            if (typeId == null) {
+                throw new IllegalStateException("Component type " + componentClass.getName() + " not registered in world");
+            }
+            int componentIndex = record.archetype.indexOfComponentType(typeId);
+            if (componentIndex < 0) {
+                throw new IllegalStateException("Component index not found after add for " + componentClass.getName());
+            }
+
+            // BỘ NHỚ ĐÃ TỒN TẠI VÀ ĐƯỢC ZERO-ED TRONG CHUNK CONSTRUCTOR
+            MemorySegment liveSegment = chunk.getComponentData(componentIndex, record.location.indexInChunk);
+
+            // 3. "Bind" (trỏ) các handle vào slot bộ nhớ đó
+            rawHandle.reset(liveSegment, componentManager.getDescriptor(componentClass));
+            typedHandle.__bind(rawHandle);
+
+            // 4. Gọi lambda của user: user đang ghi TRỰC TIẾP vào bộ nhớ của chunk
+            initializer.accept((THandle) typedHandle);
+
+        } finally {
+            // 5. Luôn luôn trả handle về pool
+            componentManager.releaseHandle(rawHandle);
+            componentManager.releaseTypedHandle(componentClass, typedHandle);
         }
     }
 }

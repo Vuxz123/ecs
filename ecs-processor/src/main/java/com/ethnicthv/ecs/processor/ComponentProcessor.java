@@ -430,7 +430,12 @@ public class ComponentProcessor extends BaseProcessor {
             w.write("    private " + name + "() {}\n\n");
             w.write("    public static void registerAll(com.ethnicthv.ecs.core.components.ComponentManager mgr) {\n");
             for (String fqnComp : collectedComponents) {
-                w.write("        mgr.registerComponentWithDescriptor(" + fqnComp + ".class, " + fqnComp + "Meta.DESCRIPTOR);\n");
+                String handleFqn = fqnComp + "Handle";
+                w.write("        mgr.registerComponentWithHandle(\n");
+                w.write("            " + fqnComp + ".class,\n");
+                w.write("            " + fqnComp + "Meta.DESCRIPTOR,\n");
+                w.write("            " + handleFqn + "::new\n");
+                w.write("        );\n");
             }
             w.write("    }\n");
             w.write("}\n");

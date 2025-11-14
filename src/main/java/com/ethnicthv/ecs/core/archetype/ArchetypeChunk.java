@@ -119,7 +119,20 @@ public final class ArchetypeChunk implements IArchetypeChunk {
                 entityIds.set(head, entityId);
                 // mark occupancy bit so iterators can observe
                 setBit(head);
-                size.incrementAndGet();
+                int newSize = size.incrementAndGet();
+                if (newSize > capacity) {
+                    // Defensive: should never happen; roll back and fail fast
+                    size.decrementAndGet();
+                    clearBit(head);
+                    entityIds.set(head, -1);
+                    // push slot back to free list
+                    while (true) {
+                        int h = freeHead.get();
+                        nextFree[head] = h;
+                        if (freeHead.compareAndSet(h, head)) break;
+                    }
+                    throw new IllegalStateException("ArchetypeChunk size overflow: " + newSize + " > capacity=" + capacity);
+                }
                 return head;
             }
             // CAS failed: retry
@@ -133,7 +146,13 @@ public final class ArchetypeChunk implements IArchetypeChunk {
             // already free; ignore double free
             return;
         }
-        size.decrementAndGet();
+        int newSize = size.decrementAndGet();
+        if (newSize < 0) {
+            // Defensive: should never happen; restore and fail fast
+            size.incrementAndGet();
+            entityIds.set(index, -1);
+            throw new IllegalStateException("ArchetypeChunk size underflow: " + newSize);
+        }
         // clear occupancy bit (iteration won't visit this index after this point)
         clearBit(index);
         // push index onto free list
@@ -311,3 +330,4 @@ public final class ArchetypeChunk implements IArchetypeChunk {
         return componentArrays[componentIndex];
     }
 }
+

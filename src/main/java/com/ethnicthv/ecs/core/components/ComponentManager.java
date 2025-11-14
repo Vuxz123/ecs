@@ -18,10 +18,15 @@ public class ComponentManager {
     // Thread-safe registries
     private final ConcurrentHashMap<Class<?>, ComponentDescriptor> descriptors = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Class<?>, Integer> componentTypeIds = new ConcurrentHashMap<>();
+    // [THÊM VÀO] Map ID -> Descriptor để tra cứu O(1) theo typeId
+    private final ConcurrentHashMap<Integer, ComponentDescriptor> idToDescriptorMap = new ConcurrentHashMap<>();
     private final AtomicInteger nextTypeId = new AtomicInteger(0);
 
     // Pool of reusable ComponentHandle instances to avoid allocations when mapping into archetype arrays
     private final ConcurrentLinkedDeque<ComponentHandle> handlePool = new ConcurrentLinkedDeque<>();
+
+    // Typed handle pools keyed by component class, used by AP-generated code for PositionHandle, etc.
+    private final ConcurrentHashMap<Class<?>, HandlePool<? extends IBindableHandle>> typedHandlePools = new ConcurrentHashMap<>();
 
     /**
      * Register a component class and analyze its layout using reflection
@@ -42,7 +47,10 @@ public class ComponentManager {
         // Prefer generated descriptor if present; else build via reflection
         descriptors.computeIfAbsent(componentClass, cls -> {
             ComponentDescriptor gen = tryLoadGeneratedDescriptor(cls);
-            return gen != null ? gen : buildDescriptor(cls);
+            ComponentDescriptor desc = gen != null ? gen : buildDescriptor(cls);
+            // Cập nhật map ID -> Descriptor cho lookup O(1)
+            idToDescriptorMap.put(typeId, desc);
+            return desc;
         });
 
         return typeId;
@@ -64,7 +72,20 @@ public class ComponentManager {
             throw new IllegalArgumentException("descriptor must not be null for " + componentClass.getName());
         }
         descriptors.putIfAbsent(componentClass, descriptor);
+        // Cập nhật cả map ID -> Descriptor (không ghi đè nếu đã có)
+        idToDescriptorMap.putIfAbsent(typeId, descriptor);
         return typeId;
+    }
+
+    // High-level registration used by AP-generated code to install both descriptor and typed handle pool.
+    public <T extends IBindableHandle> void registerComponentWithHandle(
+        Class<?> componentClass,
+        ComponentDescriptor descriptor,
+        java.util.function.Supplier<T> handleFactory
+    ) {
+        int typeId = registerComponentWithDescriptor(componentClass, descriptor);
+        HandlePool<T> pool = new HandlePool<>(handleFactory);
+        typedHandlePools.put(componentClass, pool);
     }
 
     /**
@@ -454,5 +475,38 @@ public class ComponentManager {
                     " has unsupported type " + t.getName() + ". Only primitive types are allowed.");
             }
         }
+    }
+
+    // Acquire a typed handle instance from the pool for the given component class.
+    public IBindableHandle acquireTypedHandle(Class<?> componentClass) {
+        HandlePool<?> pool = typedHandlePools.get(componentClass);
+        if (pool == null) {
+            throw new IllegalArgumentException("No typed handle pool registered for component: " + componentClass.getName());
+        }
+        return pool.acquire();
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public void releaseTypedHandle(Class<?> componentClass, IBindableHandle handle) {
+        HandlePool pool = typedHandlePools.get(componentClass);
+        if (pool != null) {
+            pool.release(handle);
+        }
+    }
+
+    /**
+     * Returns an unmodifiable view of the registered component->id mapping.
+     * This allows external clients (e.g., ArchetypeWorld) to resolve ids back to classes
+     * without duplicating ID ownership.
+     */
+    public Set<Map.Entry<Class<?>, Integer>> getRegisteredComponentIds() {
+        return componentTypeIds.entrySet();
+    }
+
+    /**
+     * Lấy ComponentDescriptor trực tiếp bằng Type ID (O(1)).
+     */
+    public ComponentDescriptor getDescriptor(int typeId) {
+        return idToDescriptorMap.get(typeId);
     }
 }

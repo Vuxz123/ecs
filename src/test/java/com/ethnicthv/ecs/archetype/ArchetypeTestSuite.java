@@ -33,7 +33,11 @@ import org.junit.platform.suite.api.SuiteDisplayName;
         ArchetypeMemorySafetyTest.class,
         ArchetypeEdgeCasesTest.class,
         ArchetypePerformanceTest.class,
-        ArchetypeDataIntegrityTest.class
+        ArchetypeDataIntegrityTest.class,
+
+        EntityCommandBufferMutateTest.class,
+        EntityCommandBufferSharedTest.class,
+        ArchetypeWorldTypedHandleTest.class,
 })
 public class ArchetypeTestSuite {
     // This class is used as a test suite runner
