@@ -330,4 +330,3 @@ public final class ArchetypeChunk implements IArchetypeChunk {
         return componentArrays[componentIndex];
     }
 }
-
