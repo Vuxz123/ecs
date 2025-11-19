@@ -3,10 +3,7 @@ package com.ethnicthv.ecs;
 import com.ethnicthv.ecs.core.archetype.ArchetypeWorld;
 import com.ethnicthv.ecs.core.components.ComponentManager;
 import com.ethnicthv.ecs.core.components.IBindableHandle;
-import com.ethnicthv.ecs.core.system.GameLoop;
-import com.ethnicthv.ecs.core.system.ISystem;
-import com.ethnicthv.ecs.core.system.SystemGroup;
-import com.ethnicthv.ecs.core.system.SystemManager;
+import com.ethnicthv.ecs.core.system.*;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -146,7 +143,6 @@ public final class ECS implements AutoCloseable {
     // =================================================================
 
     public static class Builder {
-        // We create ComponentManager first because it is the Source of Truth for IDs.
         private final ComponentManager componentManager = new ComponentManager();
         private final List<SystemRegistration> systems = new ArrayList<>();
         private boolean autoRegisterComponents = true;
@@ -222,11 +218,7 @@ public final class ECS implements AutoCloseable {
 
             // 4. Register Systems (Dependency Injection happens here)
             for (SystemRegistration reg : systems) {
-                try {
-                    sysMgr.registerPipelineSystem(reg.system(), reg.group());
-                } catch (Exception ex) {
-                    throw new IllegalStateException("Failed to register system " + reg.system().getClass().getName(), ex);
-                }
+                sysMgr.registerPipelineSystem(reg.system(), reg.group());
             }
 
             return new ECS(world, sysMgr);
