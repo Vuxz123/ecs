@@ -1,126 +1,102 @@
+import com.vanniktech.maven.publish.MavenPublishBaseExtension
+
 plugins {
-    id("java")
-    id("application")
-    `java-library`
-    id("me.champeau.jmh") version "0.7.3"
+    base
+    id("com.vanniktech.maven.publish") version "0.34.0" apply false
 }
 
-group = "com.ethnicthv"
-version = "1.0-SNAPSHOT"
+// Cấu hình chung cho TẤT CẢ các module con (core, processor, test, benchmark)
+subprojects {
+    // 1. Định danh chung
+    group = "io.github.vuxz123"
+    version = "0.1.0"
 
-java {
-    toolchain {
-        languageVersion.set(JavaLanguageVersion.of(25))
+    // 2. Kho thư viện chung (đỡ phải khai báo 4 lần)
+    repositories {
+        mavenCentral()
+    }
+
+    // 3. Cấu hình Java chung (Chỉ áp dụng nếu module đó là Java project)
+    plugins.withType<JavaPlugin> {
+        extensions.configure<JavaPluginExtension> {
+            toolchain {
+                languageVersion.set(JavaLanguageVersion.of(25))
+            }
+        }
+
+        // 4. Tự động bật Preview & Panama cho tất cả module
+        // Cậu sẽ KHÔNG cần khai báo lại cái này ở module con nữa!
+        tasks.withType<JavaCompile> {
+            options.encoding = "UTF-8"
+            options.compilerArgs.addAll(listOf(
+                "--enable-preview",
+                "--add-modules", "jdk.incubator.vector"
+            ))
+        }
+
+        // Cấu hình Test chung
+        tasks.withType<Test> {
+            useJUnitPlatform()
+            jvmArgs(
+                "--enable-preview",
+                "--enable-native-access=ALL-UNNAMED",
+                "--add-modules", "jdk.incubator.vector"
+            )
+        }
     }
 }
 
-repositories {
-    mavenCentral()
-}
+// Lọc ra các module cần publish và duyệt qua từng cái
+subprojects {
+    // Chỉ áp dụng cho 2 module này
+    if (name == "ecs-core" || name == "ecs-processor") {
 
-dependencies {
-    // Enable our annotation processor for compile
-    annotationProcessor(project(":ecs-processor"))
-    // Enable it for tests as well
-    testAnnotationProcessor(project(":ecs-processor"))
-    jmhAnnotationProcessor(project(":ecs-processor"))
+        // Ép Gradle luôn tìm file secring.gpg ở thư mục gốc project (Root Project)
+        // thay vì tìm trong thư mục con.
+        extra["signing.secretKeyRingFile"] = rootProject.file("secring.gpg").absolutePath.replace("\\", "/")
 
-    testImplementation(platform("org.junit:junit-bom:5.10.0"))
-    testImplementation("org.junit.jupiter:junit-jupiter")
-    testImplementation("org.junit.platform:junit-platform-suite-api")
-    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
-    testRuntimeOnly("org.junit.platform:junit-platform-suite-engine")
+        // Apply plugin
+        apply(plugin = "com.vanniktech.maven.publish")
 
-    // JMH for benchmarking
-    implementation ("org.openjdk.jmh:jmh-core:0.9")
-    annotationProcessor ("org.openjdk.jmh:jmh-generator-annprocess:0.9")
-    // proc ('org.openjdk.jmh:jmh-generator-bytecode:0.9')
+        // Cấu hình Extension (Dùng extensions.configure thay vì configure<T>)
+        extensions.configure<MavenPublishBaseExtension> {
+            publishToMavenCentral()
+            signAllPublications()
 
-    // Fix for "NoClassDefFoundError: javax/annotation/Generated" on JDK 9+
-    annotationProcessor("javax.annotation:javax.annotation-api:1.3.2")
-    implementation("javax.annotation:javax.annotation-api:1.3.2")
-}
+            coordinates(
+                groupId = "io.github.vuxz123",
+                artifactId = project.name,
+                version = "0.1.0"
+            )
 
-application {
-    // updated to use the demo package where the entry points were moved
-    mainClass.set("com.ethnicthv.ecs.demo.ECSDemo")
-}
+            pom {
+                name.set("My ECS Engine")
+                description.set("A high-performance Entity Component System for Java using Project Panama.")
+                inceptionYear.set("2025")
+                url.set("https://github.com/vuxz123/ecs")
 
-tasks.test {
-    useJUnitPlatform()
-}
+                licenses {
+                    license {
+                        name.set("The Apache License, Version 2.0")
+                        url.set("http://www.apache.org/licenses/LICENSE-2.0.txt")
+                        distribution.set("repo")
+                    }
+                }
 
-tasks.withType<JavaCompile> {
-    options.compilerArgs.addAll(listOf(
-        "--enable-preview",
-        "--add-modules", "jdk.incubator.vector"
-    ))
-}
+                developers {
+                    developer {
+                        id.set("vuxz123")
+                        name.set("EthnicTHV")
+                        url.set("https://github.com/vuxz123")
+                    }
+                }
 
-tasks.withType<Test> {
-    jvmArgs("--enable-preview", "--add-modules", "jdk.incubator.vector")
-}
-
-tasks.withType<JavaExec> {
-    jvmArgs("--enable-preview", "--add-modules", "jdk.incubator.vector")
-}
-
-tasks.register<JavaExec>("runBenchmark") {
-    group = "application"
-    description = "Run the performance benchmark"
-    mainClass.set("com.ethnicthv.ecs.demo.PerformanceBenchmark")
-    classpath = sourceSets["main"].runtimeClasspath
-}
-
-tasks.register<JavaExec>("runComponentDemo") {
-    group = "application"
-    description = "Run the ComponentManager demo"
-    mainClass.set("com.ethnicthv.ecs.demo.ComponentManagerDemo")
-    classpath = sourceSets["main"].runtimeClasspath
-    jvmArgs("--enable-preview", "--add-modules", "jdk.incubator.vector")
-}
-
-tasks.register<JavaExec>("runImproved") {
-    group = "application"
-    description = "Run the improved demo with Query API and true SoA"
-    classpath = sourceSets["main"].runtimeClasspath
-    mainClass.set("com.ethnicthv.ecs.demo.ImprovedDemo")
-    jvmArgs("--enable-preview", "--add-modules", "jdk.incubator.vector")
-}
-
-tasks.register<JavaExec>("runArchetypeDemo") {
-    group = "application"
-    description = "Run the Archetype-based ECS demo"
-    classpath = sourceSets["main"].runtimeClasspath
-    mainClass.set("com.ethnicthv.ecs.demo.ArchetypeDemo")
-    jvmArgs("--enable-preview", "--add-modules", "jdk.incubator.vector")
-}
-
-tasks.register<JavaExec>("runArchetypeBenchmark") {
-    group = "application"
-    description = "Benchmark Archetype vs SparseSet ECS"
-    classpath = sourceSets["main"].runtimeClasspath
-    mainClass.set("com.ethnicthv.ecs.demo.ArchetypeVsSparseSetBenchmark")
-    jvmArgs("--enable-preview", "--add-modules", "jdk.incubator.vector")
-}
-
-tasks.register<JavaExec>("runArchetypeQueryDemo") {
-    group = "application"
-    description = "Run the ArchetypeQuery demo"
-    mainClass.set("com.ethnicthv.ecs.demo.ArchetypeQueryDemo")
-    classpath = sourceSets["main"].runtimeClasspath
-    jvmArgs("--enable-preview", "--add-modules", "jdk.incubator.vector")
-}
-
-tasks.register<JavaExec>("runComponentBenchmark") {
-    group = "application"
-    description = "Run Component Manager + Archetype ECS benchmark"
-    mainClass.set("com.ethnicthv.ecs.demo.ComponentManagerBenchmark")
-    classpath = sourceSets["main"].runtimeClasspath
-    jvmArgs(
-        "--enable-preview",
-        "--add-modules", "jdk.incubator.vector",
-        "-Xms2G",
-        "-Xmx4G"
-    )
+                scm {
+                    url.set("https://github.com/vuxz123/ecs")
+                    connection.set("scm:git:git://github.com/vuxz123/ecs.git")
+                    developerConnection.set("scm:git:ssh://git@github.com/vuxz123/ecs.git")
+                }
+            }
+        }
+    }
 }

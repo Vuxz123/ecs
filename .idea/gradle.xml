@@ -9,7 +9,10 @@
         <option name="modules">
           <set>
             <option value="$PROJECT_DIR$" />
+            <option value="$PROJECT_DIR$/ecs-benchmark" />
+            <option value="$PROJECT_DIR$/ecs-core" />
             <option value="$PROJECT_DIR$/ecs-processor" />
+            <option value="$PROJECT_DIR$/ecs-test" />
           </set>
         </option>
       </GradleProjectSettings>

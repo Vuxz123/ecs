@@ -1,5 +1,7 @@
 package com.ethnicthv.ecs.processor;
 
+import com.google.auto.service.AutoService;
+
 import javax.annotation.processing.*;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.*;
@@ -14,6 +16,7 @@ import java.util.*;
     "com.ethnicthv.ecs.core.system.annotation.Query"
 })
 @SupportedSourceVersion(SourceVersion.RELEASE_25)
+@AutoService(Processor.class)
 public class QueryProcessor extends BaseProcessor {
     // ---------------------------------------------------------------------
     // Constants

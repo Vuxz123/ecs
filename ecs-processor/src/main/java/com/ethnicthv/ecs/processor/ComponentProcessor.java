@@ -1,5 +1,7 @@
 package com.ethnicthv.ecs.processor;
 
+import com.google.auto.service.AutoService;
+
 import javax.annotation.processing.*;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.*;
@@ -24,6 +26,7 @@ import java.util.stream.Collectors;
         "com.ethnicthv.ecs.core.components.Component.Layout",
 })
 @SupportedSourceVersion(SourceVersion.RELEASE_25)
+@AutoService(Processor.class)
 public class ComponentProcessor extends BaseProcessor {
     // ---------------------------------------------------------------------
     // Constants
