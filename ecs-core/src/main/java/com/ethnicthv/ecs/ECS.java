@@ -210,13 +210,9 @@ public final class ECS implements AutoCloseable {
                 }
             }
 
-            // 2. Create World (ComponentManager passed in as the single source of truth)
             ArchetypeWorld world = new ArchetypeWorld(componentManager);
-
-            // 3. Create SystemManager
             SystemManager sysMgr = new SystemManager(world);
 
-            // 4. Register Systems (Dependency Injection happens here)
             for (SystemRegistration reg : systems) {
                 sysMgr.registerPipelineSystem(reg.system(), reg.group());
             }
