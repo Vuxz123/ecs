@@ -48,6 +48,18 @@ try (var ecs = ECS.builder()
 }
 ```
 
+## Performance Snapshot
+
+On the reference machine used for our published benchmarks (`results-11-52-14-11-2025.txt`):
+
+- **1,000,000 entities created in ~151 ms.**
+- **Full read/write passes over 1,000,000 entities in ~13–15 ms.**
+- **Parallel queries ~3.8× faster than sequential** on large worlds (1,000,000 entities: ~23.6 ms → ~6.2 ms).
+- **Batched structural changes ~1.6–1.7× faster** than per-entity add/remove at 100,000 entities.
+- **EntityCommandBuffer up to ~10× faster** than per-entity mutation in heavy workloads at 10,000 entities.
+
+These numbers are measured from the real `ecs-benchmark` module against the same APIs you use. See `docs/BENCHMARKS.md` for tables and details.
+
 ## Feature Highlights
 - Archetype + True SoA layout with zero-copy component handles (see `IMPROVEMENTS.md`)
 - Annotation processor drives codegen + automatic registration via `GeneratedComponents`
