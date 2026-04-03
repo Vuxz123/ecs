@@ -79,3 +79,12 @@ tasks.register<JavaExec>("runSystemDemo") {
     mainClass.set("com.ethnicthv.ecs.demo.SystemAPIDemo")
     jvmArgs("--enable-preview", "--enable-native-access=ALL-UNNAMED", "--add-modules", "jdk.incubator.vector")
 }
+
+tasks.register<JavaExec>("runTerminalGame") {
+    group = "application"
+    description = "Run the terminal dungeon demo"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("com.ethnicthv.ecs.demo.TerminalDungeonDemo")
+    standardInput = System.`in`
+    jvmArgs("--enable-preview", "--enable-native-access=ALL-UNNAMED", "--add-modules", "jdk.incubator.vector")
+}
