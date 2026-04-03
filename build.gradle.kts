@@ -9,7 +9,7 @@ plugins {
 subprojects {
     // 1. Định danh chung
     group = "io.github.vuxz123"
-    version = "0.1.0"
+    version = "0.2.0"
 
     // 2. Kho thư viện chung (đỡ phải khai báo 4 lần)
     repositories {
@@ -66,7 +66,7 @@ subprojects {
             coordinates(
                 groupId = "io.github.vuxz123",
                 artifactId = project.name,
-                version = "0.1.0"
+                version = project.version.toString()
             )
 
             pom {

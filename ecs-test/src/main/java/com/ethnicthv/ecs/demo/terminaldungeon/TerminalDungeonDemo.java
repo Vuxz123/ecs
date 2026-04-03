@@ -11,11 +11,6 @@ import com.ethnicthv.ecs.core.system.SystemManager;
 import com.ethnicthv.ecs.core.system.UpdateMode;
 import com.ethnicthv.ecs.core.system.annotation.Id;
 import com.ethnicthv.ecs.core.system.annotation.Query;
-import com.ethnicthv.ecs.demo.DungeonPositionHandle;
-import com.ethnicthv.ecs.demo.EnemyStateHandle;
-import com.ethnicthv.ecs.demo.PlayerStateHandle;
-import com.ethnicthv.ecs.demo.TreasureStateHandle;
-
 import java.lang.foreign.Arena;
 import java.util.Locale;
 import java.util.Scanner;
