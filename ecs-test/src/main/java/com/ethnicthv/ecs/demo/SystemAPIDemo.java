@@ -29,13 +29,7 @@ public class SystemAPIDemo {
             // Create entities using the new ECS API
             System.out.println("Creating 10,000 entities...");
             for (int i = 0; i < 10000; i++) {
-                int entityId = ecs.createEntity(
-                        PositionComponent.class,
-                        VelocityComponent.class,
-                        HealthComponent.class,
-                        NameComponent.class,
-                        IndexComponent.class
-                );
+                int entityId = ecs.createEntity();
 
                 int indexValue = i; // effectively final copy for lambda capture
 

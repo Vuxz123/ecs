@@ -5,7 +5,11 @@ package com.ethnicthv.ecs.core.api.archetype;
  * <p>
  * This interface follows the Builder pattern and allows fluent configuration
  * of query criteria. Once configuration is complete, call {@link #build()}
- * to create an immutable {@link IQuery} instance.
+ * to create an immutable {@link IQuery} snapshot of the current configuration.
+ * In the low-level {@code ArchetypeQuery} implementation, components passed to
+ * {@link #with(Class)} are exposed to entity callbacks as unmanaged-instance
+ * {@code ComponentHandle}s; managed component objects are provided by generated
+ * {@code @Query} runners instead.
  * <p>
  * Example usage:
  * <pre>{@code
@@ -23,7 +27,10 @@ public interface IQueryBuilder {
     /**
      * Add a required component to the query.
      * <p>
-     * Entities must have this component to match the query.
+     * Entities must have this component to match the query. In the manual
+     * low-level query path, this is limited to unmanaged instance components
+     * because entity iteration exposes {@code ComponentHandle[]} rather than
+     * managed objects.
      *
      * @param componentClass the component class to require
      * @param <T> the component type
@@ -63,10 +70,11 @@ public interface IQueryBuilder {
     IQueryBuilder withShared(Class<?> unmanagedSharedType, long value);
 
     /**
-     * Build an immutable query from this builder's configuration.
+     * Build an immutable query snapshot from this builder's current configuration.
      * <p>
-     * The returned {@link IQuery} is thread-safe and immutable.
-     * This builder can continue to be used after calling build().
+     * The returned {@link IQuery} is thread-safe and immutable with respect to
+     * its captured query configuration. This builder can continue to be used
+     * after calling build().
      *
      * @return an immutable query instance
      */

@@ -2,25 +2,25 @@ package com.ethnicthv.ecs.core.archetype;
 
 import com.ethnicthv.ecs.core.api.archetype.IQuery;
 import com.ethnicthv.ecs.core.api.archetype.IQueryBuilder;
-import com.ethnicthv.ecs.core.api.archetype.IArchetypeChunk;
+import com.ethnicthv.ecs.core.components.Component;
+import com.ethnicthv.ecs.core.components.ComponentDescriptor;
 import com.ethnicthv.ecs.core.components.ComponentHandle;
 import com.ethnicthv.ecs.core.components.ComponentManager;
 
 import java.util.ArrayList;
-import java.util.List;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Consumer;
 
 /**
- * Query system for filtering archetypes based on component requirements.
+ * Mutable builder plus executable query implementation for archetype filtering.
  * <p>
- * This class implements both {@link IQueryBuilder} (for configuration) and
- * {@link IQuery} (for execution). Once {@link #build()} is called, it returns
- * an immutable snapshot of the query configuration.
- * <p>
- * Supports:
- * - with(): entities MUST have these components
- * - without(): entities MUST NOT have these components
- * - any(): entities must have AT LEAST ONE of these components
+ * Calling {@link #build()} returns an immutable snapshot of the current builder
+ * configuration. Executing methods directly on this builder also works, but they
+ * always operate on a fresh snapshot of the builder state at call time.
+ * The low-level entity iteration path exposes {@link ComponentHandle} instances
+ * only for unmanaged instance components configured via {@link #with(Class)}.
  */
 public final class ArchetypeQuery implements IQueryBuilder, IQuery {
     private final ArchetypeWorld world;
@@ -31,55 +31,131 @@ public final class ArchetypeQuery implements IQueryBuilder, IQuery {
     private final List<Class<?>> compList = new ArrayList<>();
     private final List<Integer> compIdxList = new ArrayList<>();
 
-    // New: shared filters (at most one managed value and many unmanaged pairs)
     private Object managedSharedFilter = null;
     private final List<UnmanagedFilter> unmanagedSharedFilters = new ArrayList<>();
 
-    // Expose for generated code to reference as a type
     public static final class UnmanagedFilter {
         public final Class<?> type;
         public final long value;
-        public UnmanagedFilter(Class<?> type, long value) { this.type = type; this.value = value; }
+
+        public UnmanagedFilter(Class<?> type, long value) {
+            this.type = type;
+            this.value = value;
+        }
     }
 
-    public ArchetypeQuery(ArchetypeWorld world) { this.world = world; }
+    private record ResolvedUnmanagedFilter(int typeId, long value) {}
 
-    /**
-     * Require entities to have this component
-     */
-    public <T> ArchetypeQuery with(Class<T> componentClass) {
+    private record SharedFilterState(
+        boolean hasFilters,
+        boolean impossible,
+        int managedSharedTypeId,
+        int managedSharedTicket,
+        List<ResolvedUnmanagedFilter> unmanagedFilters
+    ) {}
+
+    private record QuerySnapshot(
+        ArchetypeWorld world,
+        Class<?>[] componentClasses,
+        int[] componentTypeIds,
+        ComponentMask withMask,
+        ComponentMask withoutMask,
+        List<ComponentMask> anyMasks,
+        Object managedSharedFilter,
+        int managedSharedTypeId,
+        List<ResolvedUnmanagedFilter> unmanagedSharedFilters
+    ) {}
+
+    private final class BuiltQuery implements IQuery {
+        private final QuerySnapshot snapshot;
+
+        private BuiltQuery(QuerySnapshot snapshot) {
+            this.snapshot = snapshot;
+        }
+
+        @Override
+        public void forEach(IQuery.ArchetypeConsumer consumer) {
+            executeForEach(snapshot, consumer);
+        }
+
+        @Override
+        public void forEachChunk(IQuery.ChunkConsumer consumer) {
+            executeForEachChunk(snapshot, consumer);
+        }
+
+        @Override
+        public void forEachEntity(IQuery.EntityConsumer consumer) {
+            executeForEachEntity(snapshot, consumer);
+        }
+
+        @Override
+        public int count() {
+            return executeCount(snapshot);
+        }
+
+        @Override
+        public void forEachParallel(IQuery.EntityConsumer consumer) {
+            executeForEachParallel(snapshot, consumer);
+        }
+    }
+
+    public ArchetypeQuery(ArchetypeWorld world) {
+        this.world = world;
+    }
+
+    private int requireRegisteredComponentId(Class<?> componentClass) {
         Integer componentTypeId = world.getComponentTypeId(componentClass);
+        if (componentTypeId == null) {
+            throw new IllegalArgumentException("Component type not registered: " + componentClass.getName());
+        }
+        return componentTypeId;
+    }
+
+    private ComponentDescriptor requireDescriptor(Class<?> componentClass) {
+        ComponentDescriptor descriptor = world.getComponentManager().getDescriptor(componentClass);
+        if (descriptor == null) {
+            throw new IllegalArgumentException("Component descriptor not found: " + componentClass.getName());
+        }
+        return descriptor;
+    }
+
+    private void requireUnmanagedInstanceComponentForEntityIteration(Class<?> componentClass) {
+        ComponentDescriptor descriptor = requireDescriptor(componentClass);
+        if (descriptor.getKind() != ComponentDescriptor.ComponentKind.INSTANCE_UNMANAGED) {
+            throw new IllegalArgumentException(
+                "ArchetypeQuery.with() only supports unmanaged instance components for direct handle access: " +
+                    componentClass.getName()
+            );
+        }
+        if (componentClass.isAnnotationPresent(Component.Shared.class)) {
+            throw new IllegalArgumentException(
+                "ArchetypeQuery.with() does not accept @Shared component types; use withShared(...) instead: " +
+                    componentClass.getName()
+            );
+        }
+    }
+
+    @Override
+    public <T> ArchetypeQuery with(Class<T> componentClass) {
+        int componentTypeId = requireRegisteredComponentId(componentClass);
+        requireUnmanagedInstanceComponentForEntityIteration(componentClass);
         compList.add(componentClass);
         compIdxList.add(componentTypeId);
-
-        if (componentTypeId != null) {
-            withMask.with(componentTypeId);
-        }
+        withMask.with(componentTypeId);
         return this;
     }
 
-    /**
-     * Require entities to NOT have this component
-     */
+    @Override
     public <T> ArchetypeQuery without(Class<T> componentClass) {
-        Integer componentTypeId = world.getComponentTypeId(componentClass);
-        if (componentTypeId != null) {
-            withoutMask.with(componentTypeId);
-        }
+        withoutMask.with(requireRegisteredComponentId(componentClass));
         return this;
     }
 
-    /**
-     * Require entities to have at least one of the specified components
-     */
     @Override
     public ArchetypeQuery any(Class<?>... componentClasses) {
         ComponentMask.Builder anyBuilder = ComponentMask.builder();
         for (Class<?> componentClass : componentClasses) {
-            Integer componentTypeId = world.getComponentTypeId(componentClass);
-            if (componentTypeId != null) {
-                anyBuilder.with(componentTypeId);
-            }
+            anyBuilder.with(requireRegisteredComponentId(componentClass));
         }
         anyMasks.add(anyBuilder.build());
         return this;
@@ -87,156 +163,221 @@ public final class ArchetypeQuery implements IQueryBuilder, IQuery {
 
     @Override
     public IQueryBuilder withShared(Object managedValue) {
+        if (managedValue == null) {
+            throw new IllegalArgumentException("managedValue must not be null");
+        }
+        requireRegisteredComponentId(managedValue.getClass());
+        ComponentDescriptor descriptor = requireDescriptor(managedValue.getClass());
+        if (descriptor.getKind() != ComponentDescriptor.ComponentKind.SHARED_MANAGED) {
+            throw new IllegalArgumentException("Type is not a @Shared @Managed Component type: " + managedValue.getClass().getName());
+        }
         this.managedSharedFilter = managedValue;
         return this;
     }
 
     @Override
     public IQueryBuilder withShared(Class<?> unmanagedSharedType, long value) {
+        requireRegisteredComponentId(unmanagedSharedType);
+        ComponentDescriptor descriptor = requireDescriptor(unmanagedSharedType);
+        if (descriptor.getKind() != ComponentDescriptor.ComponentKind.SHARED_UNMANAGED) {
+            throw new IllegalArgumentException("Type is not an @Shared unmanaged Component type: " + unmanagedSharedType.getName());
+        }
         unmanagedSharedFilters.add(new UnmanagedFilter(unmanagedSharedType, value));
         return this;
     }
 
-    /**
-     * Build an immutable query from this builder's configuration.
-     * <p>
-     * This method creates a snapshot of the current query configuration.
-     * The returned {@link IQuery} is immutable and thread-safe.
-     * <p>
-     * Note: Since ArchetypeQuery implements both IQueryBuilder and IQuery,
-     * this method simply returns itself. However, callers should treat the
-     * returned reference as immutable and not call builder methods on it.
-     *
-     * @return an immutable query instance
-     */
     @Override
     public IQuery build() {
-        // For now, we return this instance
-        // In a more sophisticated implementation, we could create
-        // a truly immutable wrapper or snapshot
-        return this;
+        return new BuiltQuery(captureSnapshot());
     }
 
-    /**
-     * Execute the query and iterate over matching archetypes
-     */
     @Override
     public void forEach(IQuery.ArchetypeConsumer consumer) {
-        ComponentMask with = withMask.build();
-        ComponentMask without = withoutMask.build();
+        build().forEach(consumer);
+    }
 
-        for (Archetype archetype : world.getAllArchetypes()) {
-            ComponentMask archetypeMask = archetype.getMask();
+    @Override
+    public void forEachChunk(IQuery.ChunkConsumer consumer) {
+        build().forEachChunk(consumer);
+    }
 
-            // WITH: archetype must contain all required bits
-            if (!archetypeMask.containsAll(with)) {
+    @Override
+    public void forEachEntity(IQuery.EntityConsumer consumer) {
+        build().forEachEntity(consumer);
+    }
+
+    @Override
+    public int count() {
+        return build().count();
+    }
+
+    @Override
+    public void forEachParallel(IQuery.EntityConsumer consumer) {
+        build().forEachParallel(consumer);
+    }
+
+    private QuerySnapshot captureSnapshot() {
+        List<ResolvedUnmanagedFilter> resolvedUnmanagedFilters = new ArrayList<>(unmanagedSharedFilters.size());
+        for (UnmanagedFilter filter : unmanagedSharedFilters) {
+            resolvedUnmanagedFilters.add(new ResolvedUnmanagedFilter(requireRegisteredComponentId(filter.type), filter.value));
+        }
+
+        int managedSharedTypeId = -1;
+        if (managedSharedFilter != null) {
+            managedSharedTypeId = requireRegisteredComponentId(managedSharedFilter.getClass());
+        }
+
+        int[] componentTypeIds = new int[compIdxList.size()];
+        for (int i = 0; i < compIdxList.size(); i++) {
+            componentTypeIds[i] = compIdxList.get(i);
+        }
+
+        Class<?>[] componentClasses = compList.toArray(Class<?>[]::new);
+        return new QuerySnapshot(
+            world,
+            componentClasses,
+            componentTypeIds,
+            withMask.build(),
+            withoutMask.build(),
+            List.copyOf(anyMasks),
+            managedSharedFilter,
+            managedSharedTypeId,
+            List.copyOf(resolvedUnmanagedFilters)
+        );
+    }
+
+    private static void executeForEach(QuerySnapshot snapshot, IQuery.ArchetypeConsumer consumer) {
+        SharedFilterState sharedFilterState = resolveSharedFilterState(snapshot);
+
+        for (Archetype archetype : snapshot.world().getAllArchetypes()) {
+            if (!matchesArchetype(archetype, snapshot.withMask(), snapshot.withoutMask(), snapshot.anyMasks())) {
                 continue;
             }
-            // WITHOUT: archetype must contain none of the excluded bits
-            if (!archetypeMask.containsNone(without)) {
-                continue;
+            if (sharedFilterState.hasFilters()) {
+                final boolean[] matched = {false};
+                forEachMatchingGroup(archetype, sharedFilterState, group -> matched[0] = true);
+                if (!matched[0]) {
+                    continue;
+                }
             }
-            // ANY: archetype must intersect at least one any-mask (if present)
-            if (!anyMasks.isEmpty()) {
-                boolean matchesAny = false;
-                for (ComponentMask anyMask : anyMasks) { if (archetypeMask.intersects(anyMask)) { matchesAny = true; break; } }
-                if (!matchesAny) continue;
-            }
-
-            // Build query key if any shared filters provided
-            SharedValueKey key = buildQueryKey(archetype);
-            if (key != null) {
-                ChunkGroup group = archetype.getChunkGroup(key);
-                if (group == null) continue; // skip archetype entirely
-            }
-
             consumer.accept(archetype);
         }
     }
 
-    /**
-     * Execute query and iterate over matching chunks
-     */
-    @Override
-    public void forEachChunk(IQuery.ChunkConsumer consumer) {
-        // Use group-level filtering if possible
-        ComponentMask with = withMask.build();
-        ComponentMask without = withoutMask.build();
-        for (Archetype archetype : world.getAllArchetypes()) {
-            ComponentMask archetypeMask = archetype.getMask();
-            if (!archetypeMask.containsAll(with)) continue;
-            if (!archetypeMask.containsNone(without)) continue;
-            if (!anyMasks.isEmpty()) {
-                boolean matchesAny = false;
-                for (ComponentMask anyMask : anyMasks) { if (archetypeMask.intersects(anyMask)) { matchesAny = true; break; } }
-                if (!matchesAny) continue;
+    private static void executeForEachChunk(QuerySnapshot snapshot, IQuery.ChunkConsumer consumer) {
+        SharedFilterState sharedFilterState = resolveSharedFilterState(snapshot);
+
+        for (Archetype archetype : snapshot.world().getAllArchetypes()) {
+            if (!matchesArchetype(archetype, snapshot.withMask(), snapshot.withoutMask(), snapshot.anyMasks())) {
+                continue;
             }
-            SharedValueKey key = buildQueryKey(archetype);
-            if (key != null) {
-                ChunkGroup group = archetype.getChunkGroup(key);
-                if (group == null) continue;
+            forEachMatchingGroup(archetype, sharedFilterState, group -> {
                 ArchetypeChunk[] chunks = group.getChunksSnapshot();
                 int count = group.chunkCount();
-                for (int i = 0; i < count; i++) consumer.accept(chunks[i], archetype);
-            } else {
-                for (IArchetypeChunk chunk : archetype.getChunks()) consumer.accept(chunk, archetype);
-            }
+                for (int i = 0; i < count; i++) {
+                    consumer.accept(chunks[i], archetype);
+                }
+            });
         }
     }
 
-    /**
-     * Execute query and iterate over matching entities
-     */
-    @Override
-    public void forEachEntity(IQuery.EntityConsumer consumer) {
-        ComponentManager mgr = world.getComponentManager();
-        Class<?>[] componentClasses = new Class<?>[compList.size()];
-        for (int i = 0; i < compList.size(); i++) componentClasses[i] = compList.get(i);
+    private static void executeForEachEntity(QuerySnapshot snapshot, IQuery.EntityConsumer consumer) {
+        ComponentManager mgr = snapshot.world().getComponentManager();
+        SharedFilterState sharedFilterState = resolveSharedFilterState(snapshot);
 
-        ComponentMask with = withMask.build();
-        ComponentMask without = withoutMask.build();
-
-        for (Archetype archetype : world.getAllArchetypes()) {
-            ComponentMask archetypeMask = archetype.getMask();
-            if (!archetypeMask.containsAll(with)) continue;
-            if (!archetypeMask.containsNone(without)) continue;
-            if (!anyMasks.isEmpty()) {
-                boolean matchesAny = false;
-                for (ComponentMask anyMask : anyMasks) { if (archetypeMask.intersects(anyMask)) { matchesAny = true; break; } }
-                if (!matchesAny) continue;
+        for (Archetype archetype : snapshot.world().getAllArchetypes()) {
+            if (!matchesArchetype(archetype, snapshot.withMask(), snapshot.withoutMask(), snapshot.anyMasks())) {
+                continue;
             }
 
-            // Precompute component indices for this archetype
-            int[] compIndices = new int[compIdxList.size()];
-            boolean ok = true;
-            for (int i = 0; i < compIdxList.size(); i++) {
-                int idx = archetype.indexOfComponentType(compIdxList.get(i));
-                if (idx < 0) { ok = false; break; }
-                compIndices[i] = idx;
+            int[] compIndices = resolveComponentIndices(archetype, snapshot.componentTypeIds());
+            if (compIndices == null) {
+                continue;
             }
-            if (!ok) continue;
 
-            SharedValueKey key = buildQueryKey(archetype);
-            if (key != null) {
-                ChunkGroup group = archetype.getChunkGroup(key);
-                if (group == null) continue;
+            forEachMatchingGroup(archetype, sharedFilterState, group -> {
                 ArchetypeChunk[] chunks = group.getChunksSnapshot();
                 int count = group.chunkCount();
                 for (int ci = 0; ci < count; ci++) {
-                    ArchetypeChunk chunk = chunks[ci];
-                    iterateChunkEntities(chunk, mgr, componentClasses, compIndices, consumer, archetype);
+                    iterateChunkEntities(chunks[ci], mgr, snapshot.componentClasses(), compIndices, consumer, archetype);
                 }
-            } else {
-                for (IArchetypeChunk chunk : archetype.getChunks()) {
-                    iterateChunkEntities((ArchetypeChunk) chunk, mgr, componentClasses, compIndices, consumer, archetype);
-                }
-            }
+            });
         }
     }
 
-    private void iterateChunkEntities(ArchetypeChunk chunk, ComponentManager mgr, Class<?>[] componentClasses, int[] compIndices, IQuery.EntityConsumer consumer, Archetype archetype) {
+    private static int executeCount(QuerySnapshot snapshot) {
+        int total = 0;
+        SharedFilterState sharedFilterState = resolveSharedFilterState(snapshot);
+
+        for (Archetype archetype : snapshot.world().getAllArchetypes()) {
+            if (!matchesArchetype(archetype, snapshot.withMask(), snapshot.withoutMask(), snapshot.anyMasks())) {
+                continue;
+            }
+            if (!sharedFilterState.hasFilters()) {
+                total += archetype.getEntityCount();
+                continue;
+            }
+            for (Map.Entry<SharedValueKey, ChunkGroup> entry : archetype.getChunkGroupEntries()) {
+                if (matchesSharedKey(archetype, entry.getKey(), sharedFilterState)) {
+                    total += entry.getValue().getEntityCount();
+                }
+            }
+        }
+
+        return total;
+    }
+
+    private static void executeForEachParallel(QuerySnapshot snapshot, IQuery.EntityConsumer consumer) {
+        if (consumer == null) {
+            throw new NullPointerException("EntityConsumer must not be null");
+        }
+        ComponentManager mgr = snapshot.world().getComponentManager();
+        SharedFilterState sharedFilterState = resolveSharedFilterState(snapshot);
+
+        for (Archetype archetype : snapshot.world().getAllArchetypes()) {
+            if (!matchesArchetype(archetype, snapshot.withMask(), snapshot.withoutMask(), snapshot.anyMasks())) {
+                continue;
+            }
+
+            int[] compIndices = resolveComponentIndices(archetype, snapshot.componentTypeIds());
+            if (compIndices == null) {
+                continue;
+            }
+
+            forEachMatchingGroup(archetype, sharedFilterState, group -> {
+                ArchetypeChunk[] chunks = group.getChunksSnapshot();
+                int count = group.chunkCount();
+                Arrays.stream(chunks, 0, count).parallel().forEach(chunk ->
+                    iterateChunkEntities(chunk, mgr, snapshot.componentClasses(), compIndices, consumer, archetype)
+                );
+            });
+        }
+    }
+
+    private static int[] resolveComponentIndices(Archetype archetype, int[] componentTypeIds) {
+        int[] compIndices = new int[componentTypeIds.length];
+        for (int i = 0; i < componentTypeIds.length; i++) {
+            int idx = archetype.indexOfComponentType(componentTypeIds[i]);
+            if (idx < 0) {
+                return null;
+            }
+            compIndices[i] = idx;
+        }
+        return compIndices;
+    }
+
+    private static void iterateChunkEntities(
+        ArchetypeChunk chunk,
+        ComponentManager mgr,
+        Class<?>[] componentClasses,
+        int[] compIndices,
+        IQuery.EntityConsumer consumer,
+        Archetype archetype
+    ) {
         ComponentHandle[] pooled = new ComponentHandle[compIndices.length];
-        for (int k = 0; k < compIndices.length; k++) pooled[k] = mgr.acquireHandle();
+        for (int k = 0; k < compIndices.length; k++) {
+            pooled[k] = mgr.acquireHandle();
+        }
         try {
             int idx = chunk.nextOccupiedIndex(0);
             while (idx >= 0) {
@@ -249,127 +390,113 @@ public final class ArchetypeQuery implements IQueryBuilder, IQuery {
                 idx = chunk.nextOccupiedIndex(idx + 1);
             }
         } finally {
-            for (int k = 0; k < compIndices.length; k++) if (pooled[k] != null) mgr.releaseHandle(pooled[k]);
-        }
-    }
-
-    /**
-     * Count matching entities
-     */
-    @Override
-    public int count() {
-        final int[] count = {0};
-        forEach(archetype -> count[0] += archetype.getEntityCount());
-        return count[0];
-    }
-
-    /**
-     * Execute the query and process matching entities in parallel across multiple CPU cores.
-     * <p>
-     * This method leverages Java's parallel streams to distribute entity processing across
-     * available CPU cores. The processing is done at the chunk level - each chunk is processed
-     * by a single thread, but different chunks may be processed concurrently.
-     * <p>
-     * <strong>THREAD SAFETY REQUIREMENTS:</strong>
-     * <ul>
-     *   <li>The provided {@code EntityConsumer} MUST be thread-safe</li>
-     *   <li>Any shared state accessed or modified by the consumer must be properly synchronized</li>
-     *   <li>The consumer may be called concurrently from multiple threads</li>
-     *   <li>There are no ordering guarantees - entities may be processed in any order</li>
-     * </ul>
-     * <p>
-     * Performance considerations:
-     * <ul>
-     *   <li>Best suited for CPU-intensive operations on large entity sets</li>
-     *   <li>Overhead of parallelization may not be worth it for very small entity counts</li>
-     *   <li>The actual parallelism depends on the ForkJoinPool common pool size</li>
-     * </ul>
-     *
-     * @param consumer A thread-safe callback that processes each matching entity.
-     *                 Called with (entityId, handles, archetype) for each entity.
-     * @throws NullPointerException if consumer is null
-     *
-     * @see #forEachEntity(EntityConsumer) for sequential processing
-     */
-    @Override
-    public void forEachParallel(IQuery.EntityConsumer consumer) {
-        if (consumer == null) throw new NullPointerException("EntityConsumer must not be null");
-        ComponentManager mgr = world.getComponentManager();
-        Class<?>[] componentClasses = new Class<?>[compList.size()];
-        for (int i = 0; i < compList.size(); i++) componentClasses[i] = compList.get(i);
-
-        ComponentMask with = withMask.build();
-        ComponentMask without = withoutMask.build();
-
-        for (Archetype archetype : world.getAllArchetypes()) {
-            ComponentMask archetypeMask = archetype.getMask();
-            if (!archetypeMask.containsAll(with)) continue;
-            if (!archetypeMask.containsNone(without)) continue;
-            if (!anyMasks.isEmpty()) {
-                boolean matchesAny = false;
-                for (ComponentMask anyMask : anyMasks) { if (archetypeMask.intersects(anyMask)) { matchesAny = true; break; } }
-                if (!matchesAny) continue;
-            }
-
-            int[] compIndices = new int[compIdxList.size()];
-            boolean ok = true;
-            for (int i = 0; i < compIdxList.size(); i++) {
-                int idx = archetype.indexOfComponentType(compIdxList.get(i));
-                if (idx < 0) { ok = false; break; }
-                compIndices[i] = idx;
-            }
-            if (!ok) continue;
-
-            SharedValueKey key = buildQueryKey(archetype);
-            if (key != null) {
-                ChunkGroup group = archetype.getChunkGroup(key);
-                if (group == null) continue;
-                ArchetypeChunk[] chunks = group.getChunksSnapshot();
-                int count = group.chunkCount();
-                Arrays.stream(chunks, 0, count).parallel().forEach(chunk ->
-                    iterateChunkEntities(chunk, mgr, componentClasses, compIndices, consumer, archetype)
-                );
-            } else {
-                ArchetypeChunk[] chunks = archetype.getChunksSnapshot();
-                int count = archetype.chunkCount();
-                Arrays.stream(chunks, 0, count).parallel().forEach(chunk ->
-                    iterateChunkEntities(chunk, mgr, componentClasses, compIndices, consumer, archetype)
-                );
+            for (int k = 0; k < compIndices.length; k++) {
+                if (pooled[k] != null) {
+                    mgr.releaseHandle(pooled[k]);
+                }
             }
         }
     }
 
-    private SharedValueKey buildQueryKey(Archetype archetype) {
-        int[] managedIdx = null;
-        long[] unmanagedVals = null;
-        boolean any = false;
+    private static boolean matchesArchetype(Archetype archetype, ComponentMask with, ComponentMask without, List<ComponentMask> anyMasks) {
+        ComponentMask archetypeMask = archetype.getMask();
+        if (!archetypeMask.containsAll(with)) {
+            return false;
+        }
+        if (!archetypeMask.containsNone(without)) {
+            return false;
+        }
+        if (!anyMasks.isEmpty()) {
+            boolean matchesAny = false;
+            for (ComponentMask anyMask : anyMasks) {
+                if (archetypeMask.intersects(anyMask)) {
+                    matchesAny = true;
+                    break;
+                }
+            }
+            if (!matchesAny) {
+                return false;
+            }
+        }
+        return true;
+    }
 
-        if (managedSharedFilter != null) {
-            int ticket = world.findSharedIndex(managedSharedFilter);
-            if (ticket < 0) return null;
-            int managedCount = archetype.getSharedManagedTypeIds().length;
-            if (managedCount == 0) return null;
-            managedIdx = new int[managedCount];
-            Arrays.fill(managedIdx, -1);
-            for (int typeId : archetype.getSharedManagedTypeIds()) {
-                int pos = archetype.getSharedManagedIndex(typeId);
-                if (pos >= 0) { managedIdx[pos] = ticket; any = true; }
+    private static SharedFilterState resolveSharedFilterState(QuerySnapshot snapshot) {
+        boolean hasFilters = snapshot.managedSharedFilter() != null || !snapshot.unmanagedSharedFilters().isEmpty();
+        if (!hasFilters) {
+            return new SharedFilterState(false, false, -1, -1, List.of());
+        }
+
+        int managedSharedTicket = -1;
+        if (snapshot.managedSharedFilter() != null) {
+            managedSharedTicket = snapshot.world().findSharedIndex(snapshot.managedSharedFilter());
+            if (managedSharedTicket < 0) {
+                return new SharedFilterState(true, true, snapshot.managedSharedTypeId(), -1, List.of());
             }
         }
-        if (!unmanagedSharedFilters.isEmpty()) {
-            int unmanagedCount = archetype.getSharedUnmanagedTypeIds().length;
-            if (unmanagedCount == 0) return null;
-            unmanagedVals = new long[unmanagedCount];
-            Arrays.fill(unmanagedVals, Long.MIN_VALUE);
-            for (UnmanagedFilter f : unmanagedSharedFilters) {
-                Integer typeId = world.getComponentTypeId(f.type);
-                if (typeId == null) return null;
-                int pos = archetype.getSharedUnmanagedIndex(typeId);
-                if (pos < 0) return null;
-                unmanagedVals[pos] = f.value; any = true;
+
+        return new SharedFilterState(
+            true,
+            false,
+            snapshot.managedSharedTypeId(),
+            managedSharedTicket,
+            snapshot.unmanagedSharedFilters()
+        );
+    }
+
+    private static boolean matchesSharedKey(Archetype archetype, SharedValueKey key, SharedFilterState state) {
+        if (!state.hasFilters()) {
+            return true;
+        }
+        if (state.impossible()) {
+            return false;
+        }
+
+        if (state.managedSharedTypeId() >= 0) {
+            int pos = archetype.getSharedManagedIndex(state.managedSharedTypeId());
+            if (pos < 0) {
+                return false;
+            }
+            int[] managedIndices = key.managedSharedIndices();
+            if (managedIndices == null || pos >= managedIndices.length) {
+                return false;
+            }
+            if (managedIndices[pos] != state.managedSharedTicket()) {
+                return false;
             }
         }
-        if (!any) return null;
-        return new SharedValueKey(managedIdx, unmanagedVals);
+
+        for (ResolvedUnmanagedFilter filter : state.unmanagedFilters()) {
+            int pos = archetype.getSharedUnmanagedIndex(filter.typeId());
+            if (pos < 0) {
+                return false;
+            }
+            long[] unmanagedValues = key.unmanagedSharedValues();
+            if (unmanagedValues == null || pos >= unmanagedValues.length) {
+                return false;
+            }
+            if (unmanagedValues[pos] != filter.value()) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void forEachMatchingGroup(Archetype archetype, SharedFilterState state, Consumer<ChunkGroup> consumer) {
+        if (!state.hasFilters()) {
+            for (Map.Entry<SharedValueKey, ChunkGroup> entry : archetype.getChunkGroupEntries()) {
+                consumer.accept(entry.getValue());
+            }
+            return;
+        }
+        if (state.impossible()) {
+            return;
+        }
+        for (Map.Entry<SharedValueKey, ChunkGroup> entry : archetype.getChunkGroupEntries()) {
+            if (matchesSharedKey(archetype, entry.getKey(), state)) {
+                consumer.accept(entry.getValue());
+            }
+        }
     }
 }

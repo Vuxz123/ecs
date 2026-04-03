@@ -20,7 +20,9 @@ Directly using `ArchetypeQuery` and `world.query()` is supported but considered 
 ### 1.2 Query API Tips
 - Prefer `@Query`-based systems with AP-generated `IGeneratedQuery` fields as your primary way to express queries. Use `fieldInject` and `ExecutionMode` to describe which entities and how they should be processed.
 - When a generated query also behaves as an `IQueryBuilder`, use it to apply lightweight per-frame filters (e.g. `withShared(TeamShared)` in `TeamFilterSystem`) while still reusing the same builder instance that was created at registration time.
+- `build()` snapshots the builder's current filter configuration into an immutable executable query; subsequent builder mutations do not retroactively change that snapshot.
 - Use `ArchetypeQuery` and the `world.query()` builder directly only when you need fine-grained control (for example, experimental filters, tooling, or code that lives outside normal systems). Treat this as an advanced, low-level API.
+- Manual `ArchetypeQuery` entity callbacks expose unmanaged `ComponentHandle[]` values only; managed instance access belongs on generated `@Query` method parameters or explicit `world.getManagedComponent(...)` lookups.
 - Use chunked processing (built into the underlying `ArchetypeQuery`) to maintain cache locality; the engine already iterates per chunk and reuses `ComponentHandle` instances.
 - Use parallel execution only when:
   - You have large entity counts (≈ 1,000+), and

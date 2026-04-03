@@ -5,7 +5,9 @@ import com.ethnicthv.ecs.core.components.ComponentHandle;
 /**
  * Immutable, thread-safe query interface for executing operations on matched entities.
  * <p>
- * This interface represents a pre-configured query that cannot be modified after creation.
+ * This interface represents a pre-configured query snapshot that cannot be modified
+ * after creation. The captured configuration is immutable, while the matched
+ * entities still reflect the current world state at execution time.
  * It provides methods for iterating over entities, chunks, and archetypes that
  * match the query criteria.
  * <p>
@@ -22,7 +24,9 @@ public interface IQuery {
          * Process a single entity.
          *
          * @param entityId the entity ID
-         * @param componentHandles array of MemorySegment handles for matched components
+         * @param componentHandles array of reusable handles for unmanaged
+         *                         instance components selected by the manual
+         *                         query builder
          * @param archetype the archetype containing this entity
          */
         void accept(int entityId, ComponentHandle[] componentHandles, IArchetype archetype);

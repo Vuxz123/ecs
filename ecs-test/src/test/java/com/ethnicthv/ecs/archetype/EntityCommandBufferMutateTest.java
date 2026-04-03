@@ -64,5 +64,35 @@ public class EntityCommandBufferMutateTest {
             assertTrue(world.hasComponent(eid, TestComponent3.class), "T3 should be added by multi-mutate");
         }
     }
+
+    @Test
+    void ecb_multiMutate_preserves_all_commands_after_lane_overflow() throws Exception {
+        int n = 3500;
+        int[] eids = new int[n];
+        for (int i = 0; i < n; i++) {
+            eids[i] = world.createEntity(TestComponent1.class);
+        }
+
+        Method getArena = ArchetypeWorld.class.getDeclaredMethod("getArena");
+        getArena.setAccessible(true);
+        Arena arena = (Arena) getArena.invoke(world);
+
+        EntityCommandBuffer ecb = new EntityCommandBuffer(arena);
+        EntityCommandBuffer.ParallelWriter writer = ecb.asParallelWriter(world);
+
+        Class<?>[] adds = new Class<?>[]{TestComponent2.class, TestComponent3.class};
+        Class<?>[] rems = new Class<?>[]{TestComponent1.class};
+        for (int eid : eids) {
+            writer.mutateComponents(eid, adds, rems);
+        }
+
+        ecb.playback(world);
+
+        for (int eid : eids) {
+            assertFalse(world.hasComponent(eid, TestComponent1.class), "T1 should be removed for every entity after overflow");
+            assertTrue(world.hasComponent(eid, TestComponent2.class), "T2 should be added for every entity after overflow");
+            assertTrue(world.hasComponent(eid, TestComponent3.class), "T3 should be added for every entity after overflow");
+        }
+    }
 }
 

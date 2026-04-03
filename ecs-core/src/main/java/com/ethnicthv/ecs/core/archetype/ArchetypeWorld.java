@@ -321,7 +321,8 @@ public final class ArchetypeWorld implements AutoCloseable {
      * Create a query builder for entities matching component requirements.
      * <p>
      * Returns a builder that can be configured with component requirements,
-     * then built into an immutable {@link com.ethnicthv.ecs.core.api.archetype.IQuery}.
+     * then built into an immutable {@link com.ethnicthv.ecs.core.api.archetype.IQuery}
+     * snapshot.
      *
      * @return a new query builder
      */

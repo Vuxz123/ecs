@@ -26,8 +26,13 @@ import org.junit.platform.suite.api.SuiteDisplayName;
         ParallelQueryTest.class,
         ManagedComponentStoreTest.class,
         ManagedIntegrationTest.class,
+        ManagedGeneratedQueryTest.class,
         MixedManagedUnmanagedRunnerTest.class,
-        
+        NegativeQueryRunnerTests.class,
+        SharedComponentTest.class,
+        ArchetypeQueryValidationTest.class,
+        GeneratedQuerySnapshotTest.class,
+
         // QA/QC Professional Test Suites
         ArchetypeThreadSafetyTest.class,
         ArchetypeMemorySafetyTest.class,

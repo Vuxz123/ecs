@@ -8,6 +8,7 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -161,10 +162,10 @@ public final class Archetype implements IArchetype {
      */
     @Override
     public List<IArchetypeChunk> getChunks() {
-        // Backward compatible: if no shared grouping used, return chunks from a default group if present
-        ChunkGroup defaultGroup = chunkGroups.getOrDefault(new SharedValueKey(null, null), null);
-        if (defaultGroup == null) return List.of();
-        List<ArchetypeChunk> list = defaultGroup.getChunks();
+        List<IArchetypeChunk> list = new ArrayList<>();
+        for (ChunkGroup group : chunkGroups.values()) {
+            list.addAll(group.getChunks());
+        }
         return new ArrayList<>(list);
     }
 
@@ -206,8 +207,11 @@ public final class Archetype implements IArchetype {
     }
 
     public int chunkCount() {
-        ChunkGroup defaultGroup = chunkGroups.get(new SharedValueKey(null, null));
-        return defaultGroup != null ? defaultGroup.chunkCount() : 0;
+        int total = 0;
+        for (ChunkGroup group : chunkGroups.values()) {
+            total += group.chunkCount();
+        }
+        return total;
     }
 
     @Override
@@ -215,8 +219,11 @@ public final class Archetype implements IArchetype {
 
     @Override
     public int getEntityCount() {
-        ChunkGroup defaultGroup = chunkGroups.get(new SharedValueKey(null, null));
-        return defaultGroup != null ? defaultGroup.getEntityCount() : 0;
+        int total = 0;
+        for (ChunkGroup group : chunkGroups.values()) {
+            total += group.getEntityCount();
+        }
+        return total;
     }
 
     /**
@@ -226,9 +233,9 @@ public final class Archetype implements IArchetype {
      * due to concurrent modification and aims to be cache-friendly.
      */
     public void forEach(ArchetypeIterator iterator) {
-        ChunkGroup defaultGroup = chunkGroups.get(new SharedValueKey(null, null));
-        if (defaultGroup == null) return;
-        defaultGroup.forEach(iterator);
+        for (ChunkGroup group : chunkGroups.values()) {
+            group.forEach(iterator);
+        }
     }
 
     /**
@@ -301,5 +308,9 @@ public final class Archetype implements IArchetype {
 
     public java.util.Collection<ChunkGroup> getAllChunkGroups() {
         return chunkGroups.values();
+    }
+
+    public List<Map.Entry<SharedValueKey, ChunkGroup>> getChunkGroupEntries() {
+        return new ArrayList<>(chunkGroups.entrySet());
     }
 }

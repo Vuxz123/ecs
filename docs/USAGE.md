@@ -41,7 +41,7 @@ Most systems in this project follow the same pattern as the demo classes in `ecs
 - A field of type `IGeneratedQuery` (optionally also `IQueryBuilder`) is declared on the system.
 - A private method annotated with `@Query` uses `fieldInject` to point at that field and describes required components and `ExecutionMode`.
 - When you call `ECS.builder().addSystem(...)`, the `SystemManager` will run the generated injector for each system at registration time, constructing and caching the appropriate query object.
-- In `onUpdate`, the system simply checks for null and calls `generatedQuery.runQuery()` (and, when needed, applies lightweight per-frame filters like `withShared(TeamShared)` on a cached builder before running).
+- In `onUpdate`, the system simply checks for null and calls `generatedQuery.runQuery()` (and, when needed, applies lightweight per-frame filters like `withShared(TeamShared)` on a cached builder before running). Generated query parameters can include managed component objects directly; the low-level manual query API does not surface managed objects in `ComponentHandle[]`.
 
 You rarely need to construct `ArchetypeQuery` manually unless you are doing advanced or integration work; the normal flow is entirely driven by `@Query` + generated `IGeneratedQuery` fields.
 

@@ -17,7 +17,7 @@ class TeamFilterSystem extends BaseSystem {
     }
 
     void updateOnlyTeamA() {
-        // The generated runner will keep stateful filter and reset after run
+        // build() snapshots the temporary shared filter and leaves the builder reusable.
         if (q instanceof IQueryBuilder b) {
             b.withShared(new TeamShared("A")).build().runQuery();
         } else if (q != null) {

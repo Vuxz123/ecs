@@ -141,6 +141,7 @@ A typical pattern, as in `MovementSystem` and `HealthRegenerationSystem`:
 Some generated query fields also implement `IQueryBuilder` (see `TeamFilterSystem`):
 - The field is still created once and cached by the injector.
 - At runtime you can adjust light filters on that builder, such as `withShared(new TeamShared("A"))`, then call `build().runQuery()`.
+- `build()` snapshots the current temporary filter state into an immutable executable query; later builder changes do not affect that built query.
 - The heavy part (wiring up the underlying query over archetypes and components) is still done once; per-frame you only tweak the filter state and run.
 
 As a rule of thumb:
@@ -155,6 +156,7 @@ If you do use it, follow these rules:
 - Build and cache an `ArchetypeQuery` once (e.g., in the constructor or `onAwake`).
 - Reuse that cached query inside `onUpdate` to iterate matching entities.
 - Avoid rebuilding the same query on every frame or inside inner loops.
+- In `forEachEntity(...)` / `forEachParallel(...)`, the `ComponentHandle[]` payload only covers unmanaged instance components named in `.with(...)`; if you need managed component objects in the callback, use `@Query` / `IGeneratedQuery` or fetch them explicitly via `world.getManagedComponent(...)`.
 
 **Query construction cost.** Building a query (whether via `@Query`-generated code or via the `ArchetypeQuery` builder) computes archetype filters and internal data structures. This is relatively heavy compared to a plain loop. You should almost always:
 - Build queries once per system (for example, during registration or `onAwake`).

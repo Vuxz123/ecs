@@ -75,6 +75,114 @@ public class SharedComponentTest {
     }
 
     @Test
+    void genericQuery_includes_entities_in_shared_groups() {
+        world.registerComponent(TestComponent1.class);
+        world.registerComponent(TeamShared.class);
+
+        int sharedA = 7;
+        int sharedB = 9;
+        for (int i = 0; i < sharedA + sharedB; i++) {
+            int eid = world.createEntity(TestComponent1.class);
+            world.setSharedComponent(eid, new TeamShared(i < sharedA ? "A" : "B"));
+        }
+
+        IQuery query = world.query().with(TestComponent1.class).build();
+        AtomicInteger entityCount = new AtomicInteger();
+        AtomicInteger chunkEntityCount = new AtomicInteger();
+
+        query.forEachEntity((_, __, ___) -> entityCount.incrementAndGet());
+        query.forEachChunk((chunk, __) -> chunkEntityCount.addAndGet(chunk.getEntityCount()));
+
+        assertEquals(sharedA + sharedB, entityCount.get(), "Generic query should include entities from all shared groups");
+        assertEquals(sharedA + sharedB, chunkEntityCount.get(), "Chunk traversal should include entities from all shared groups");
+        assertEquals(sharedA + sharedB, query.count(), "Query count should include entities from all shared groups");
+    }
+
+    @Test
+    void sharedQuery_partial_match_still_matches_when_other_shared_types_exist() {
+        world.registerComponent(TestComponent1.class);
+        world.registerComponent(TeamShared.class);
+        world.registerComponent(Region.class);
+
+        int eid = world.createEntity(TestComponent1.class);
+        world.setSharedComponent(eid, new TeamShared("A"));
+        world.setSharedComponent(eid, Region.class, 7L);
+
+        AtomicInteger teamCount = new AtomicInteger();
+        world.query().with(TestComponent1.class).withShared(new TeamShared("A")).build()
+                .forEachEntity((_, __, ___) -> teamCount.incrementAndGet());
+        assertEquals(1, teamCount.get(), "Managed shared query should match even when other shared filters are unspecified");
+
+        AtomicInteger regionCount = new AtomicInteger();
+        world.query().with(TestComponent1.class).withShared(Region.class, 7L).build()
+                .forEachEntity((_, __, ___) -> regionCount.incrementAndGet());
+        assertEquals(1, regionCount.get(), "Unmanaged shared query should match even when managed shared filters are unspecified");
+    }
+
+    @Test
+    void sharedQuery_missing_values_return_zero_results_in_all_paths() {
+        world.registerComponent(TestComponent1.class);
+        world.registerComponent(TeamShared.class);
+        world.registerComponent(Region.class);
+
+        int eid = world.createEntity(TestComponent1.class);
+        world.setSharedComponent(eid, new TeamShared("A"));
+        world.setSharedComponent(eid, Region.class, 7L);
+
+        IQuery missingManaged = world.query().with(TestComponent1.class).withShared(new TeamShared("Missing")).build();
+        AtomicInteger missingManagedSequential = new AtomicInteger();
+        AtomicInteger missingManagedParallel = new AtomicInteger();
+        AtomicInteger missingManagedChunks = new AtomicInteger();
+        missingManaged.forEachEntity((_, __, ___) -> missingManagedSequential.incrementAndGet());
+        missingManaged.forEachParallel((_, __, ___) -> missingManagedParallel.incrementAndGet());
+        missingManaged.forEachChunk((_, __) -> missingManagedChunks.incrementAndGet());
+        assertEquals(0, missingManagedSequential.get());
+        assertEquals(0, missingManagedParallel.get());
+        assertEquals(0, missingManagedChunks.get());
+        assertEquals(0, missingManaged.count());
+
+        IQuery missingUnmanaged = world.query().with(TestComponent1.class).withShared(Region.class, 99L).build();
+        AtomicInteger missingUnmanagedSequential = new AtomicInteger();
+        missingUnmanaged.forEachEntity((_, __, ___) -> missingUnmanagedSequential.incrementAndGet());
+        assertEquals(0, missingUnmanagedSequential.get());
+        assertEquals(0, missingUnmanaged.count());
+    }
+
+    @Test
+    void build_returns_snapshot_independent_of_later_builder_mutation() {
+        world.registerComponent(TestComponent1.class);
+        world.registerComponent(TeamShared.class);
+
+        int entityA = world.createEntity(TestComponent1.class);
+        int entityB = world.createEntity(TestComponent1.class);
+        world.setSharedComponent(entityA, new TeamShared("A"));
+        world.setSharedComponent(entityB, new TeamShared("B"));
+
+        var builder = world.query().with(TestComponent1.class);
+        IQuery queryA = builder.withShared(new TeamShared("A")).build();
+
+        builder.withShared(new TeamShared("B"));
+        IQuery queryB = builder.build();
+
+        assertEquals(1, queryA.count(), "Built query must keep the shared filter captured at build time");
+        assertEquals(1, queryB.count(), "Builder mutation after build should only affect later snapshots");
+    }
+
+    @Test
+    void build_snapshot_keeps_matching_late_shared_values() {
+        world.registerComponent(TestComponent1.class);
+        world.registerComponent(TeamShared.class);
+
+        IQuery query = world.query().with(TestComponent1.class).withShared(new TeamShared("Late")).build();
+        assertEquals(0, query.count());
+
+        int entity = world.createEntity(TestComponent1.class);
+        world.setSharedComponent(entity, new TeamShared("Late"));
+
+        assertEquals(1, query.count(), "Built query should continue to resolve shared values against current world state");
+    }
+
+    @Test
     void unmanagedShared_basicFilter_parallel() {
         world.registerComponent(TestComponent1.class);
         world.registerComponent(Region.class);
