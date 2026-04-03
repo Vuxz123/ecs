@@ -9,12 +9,17 @@
         <option name="modules">
           <set>
             <option value="$PROJECT_DIR$" />
+            <option value="$PROJECT_DIR$/boid-demo" />
             <option value="$PROJECT_DIR$/ecs-benchmark" />
             <option value="$PROJECT_DIR$/ecs-core" />
             <option value="$PROJECT_DIR$/ecs-processor" />
             <option value="$PROJECT_DIR$/ecs-test" />
           </set>
         </option>
+      </GradleProjectSettings>
+      <GradleProjectSettings>
+        <option name="externalProjectPath" value="$PROJECT_DIR$/boid-demo" />
+        <option name="gradleJvm" value="temurin-25" />
       </GradleProjectSettings>
     </option>
   </component>

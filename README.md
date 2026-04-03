@@ -73,6 +73,7 @@ These numbers are measured from the real `ecs-benchmark` module against the same
 - [`docs/COMPONENT_SYSTEM.md`](docs/COMPONENT_SYSTEM.md): Component annotations, Panama memory layout, ComponentManager/Descriptor/Handle usage
 - [`docs/ADVANCED_GUIDE.md`](docs/ADVANCED_GUIDE.md): Deep dives on parallel queries, memory layout, QA/QC, and tuning (appendices reference legacy design docs)
 - [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md): Snapshot of real benchmark numbers (scaling, parallel queries, batched structural changes, `EntityCommandBuffer`) using the `ecs-benchmark` module
+- [`docs/BOID_DEMO_PLAN.md`](docs/BOID_DEMO_PLAN.md): Proposed 3D boid flocking demo architecture, performance story, and phased implementation plan
 - [`docs/ROADMAP.md`](docs/ROADMAP.md): Completed milestones, current goals, and rolling backlog updated at the end of every milestone
 
 Need more? Browse `ecs-test` for runnable demos or open an issue if you want walkthroughs on additional topics.
