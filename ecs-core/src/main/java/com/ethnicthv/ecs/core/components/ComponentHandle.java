@@ -58,6 +58,37 @@ public class ComponentHandle implements IReadWriteComponentHandle {
         }
     }
 
+    private ComponentDescriptor.FieldDescriptor resolveField(int fieldIndex) {
+        ensureBound();
+        ensureIndexInRange(fieldIndex);
+        return descriptor.getField(fieldIndex);
+    }
+
+    private void ensureFieldType(ComponentDescriptor.FieldDescriptor field, ComponentDescriptor.FieldType expected) {
+        if (field.type() != expected) {
+            throw new IllegalArgumentException(
+                "Field '" + field.name() + "' has type " + field.type() + ", expected " + expected);
+        }
+    }
+
+    private void ensureScalarField(ComponentDescriptor.FieldDescriptor field) {
+        if (field.isArray()) {
+            throw new IllegalArgumentException(
+                "Field '" + field.name() + "' is a fixed array; use indexed access instead");
+        }
+    }
+
+    private long resolveElementOffset(ComponentDescriptor.FieldDescriptor field, int elementIndex) {
+        int elementCount = field.elementCount();
+        if (elementIndex < 0 || elementIndex >= elementCount) {
+            throw new IndexOutOfBoundsException(
+                "Element index out of range for field '" + field.name() + "': "
+                    + elementIndex + " (count=" + elementCount + ")"
+            );
+        }
+        return field.offset() + (field.elementSize() * elementIndex);
+    }
+
     /**
      * Resolve a field name to its index. Prefer calling once at setup and reusing the index.
      */
@@ -73,101 +104,213 @@ public class ComponentHandle implements IReadWriteComponentHandle {
     // ------------- Index-based hot-path getters -------------
     @Override
     public byte getByte(int fieldIndex) {
-        ensureBound(); ensureIndexInRange(fieldIndex);
-        var f = descriptor.getField(fieldIndex);
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.BYTE);
+        ensureScalarField(f);
         return segment.get(ValueLayout.JAVA_BYTE, f.offset());
     }
     @Override
+    public byte getByte(int fieldIndex, int elementIndex) {
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.BYTE);
+        return segment.get(ValueLayout.JAVA_BYTE, resolveElementOffset(f, elementIndex));
+    }
+    @Override
     public short getShort(int fieldIndex) {
-        ensureBound(); ensureIndexInRange(fieldIndex);
-        var f = descriptor.getField(fieldIndex);
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.SHORT);
+        ensureScalarField(f);
         return segment.get(ValueLayout.JAVA_SHORT, f.offset());
     }
     @Override
+    public short getShort(int fieldIndex, int elementIndex) {
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.SHORT);
+        return segment.get(ValueLayout.JAVA_SHORT, resolveElementOffset(f, elementIndex));
+    }
+    @Override
     public int getInt(int fieldIndex) {
-        ensureBound(); ensureIndexInRange(fieldIndex);
-        var f = descriptor.getField(fieldIndex);
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.INT);
+        ensureScalarField(f);
         return segment.get(ValueLayout.JAVA_INT, f.offset());
     }
     @Override
+    public int getInt(int fieldIndex, int elementIndex) {
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.INT);
+        return segment.get(ValueLayout.JAVA_INT, resolveElementOffset(f, elementIndex));
+    }
+    @Override
     public long getLong(int fieldIndex) {
-        ensureBound(); ensureIndexInRange(fieldIndex);
-        var f = descriptor.getField(fieldIndex);
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.LONG);
+        ensureScalarField(f);
         return segment.get(ValueLayout.JAVA_LONG, f.offset());
     }
     @Override
+    public long getLong(int fieldIndex, int elementIndex) {
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.LONG);
+        return segment.get(ValueLayout.JAVA_LONG, resolveElementOffset(f, elementIndex));
+    }
+    @Override
     public float getFloat(int fieldIndex) {
-        ensureBound(); ensureIndexInRange(fieldIndex);
-        var f = descriptor.getField(fieldIndex);
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.FLOAT);
+        ensureScalarField(f);
         return segment.get(ValueLayout.JAVA_FLOAT, f.offset());
     }
     @Override
+    public float getFloat(int fieldIndex, int elementIndex) {
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.FLOAT);
+        return segment.get(ValueLayout.JAVA_FLOAT, resolveElementOffset(f, elementIndex));
+    }
+    @Override
     public double getDouble(int fieldIndex) {
-        ensureBound(); ensureIndexInRange(fieldIndex);
-        var f = descriptor.getField(fieldIndex);
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.DOUBLE);
+        ensureScalarField(f);
         return segment.get(ValueLayout.JAVA_DOUBLE, f.offset());
     }
     @Override
+    public double getDouble(int fieldIndex, int elementIndex) {
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.DOUBLE);
+        return segment.get(ValueLayout.JAVA_DOUBLE, resolveElementOffset(f, elementIndex));
+    }
+    @Override
     public boolean getBoolean(int fieldIndex) {
-        ensureBound(); ensureIndexInRange(fieldIndex);
-        var f = descriptor.getField(fieldIndex);
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.BOOLEAN);
+        ensureScalarField(f);
         return segment.get(ValueLayout.JAVA_BOOLEAN, f.offset());
     }
     @Override
+    public boolean getBoolean(int fieldIndex, int elementIndex) {
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.BOOLEAN);
+        return segment.get(ValueLayout.JAVA_BOOLEAN, resolveElementOffset(f, elementIndex));
+    }
+    @Override
     public char getChar(int fieldIndex) {
-        ensureBound(); ensureIndexInRange(fieldIndex);
-        var f = descriptor.getField(fieldIndex);
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.CHAR);
+        ensureScalarField(f);
         return segment.get(ValueLayout.JAVA_CHAR, f.offset());
+    }
+    @Override
+    public char getChar(int fieldIndex, int elementIndex) {
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.CHAR);
+        return segment.get(ValueLayout.JAVA_CHAR, resolveElementOffset(f, elementIndex));
     }
 
     // ------------- Index-based hot-path setters -------------
     @Override
     public void setByte(int fieldIndex, byte value) {
-        ensureBound(); ensureIndexInRange(fieldIndex);
-        var f = descriptor.getField(fieldIndex);
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.BYTE);
+        ensureScalarField(f);
         segment.set(ValueLayout.JAVA_BYTE, f.offset(), value);
     }
     @Override
+    public void setByte(int fieldIndex, int elementIndex, byte value) {
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.BYTE);
+        segment.set(ValueLayout.JAVA_BYTE, resolveElementOffset(f, elementIndex), value);
+    }
+    @Override
     public void setShort(int fieldIndex, short value) {
-        ensureBound(); ensureIndexInRange(fieldIndex);
-        var f = descriptor.getField(fieldIndex);
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.SHORT);
+        ensureScalarField(f);
         segment.set(ValueLayout.JAVA_SHORT, f.offset(), value);
     }
     @Override
+    public void setShort(int fieldIndex, int elementIndex, short value) {
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.SHORT);
+        segment.set(ValueLayout.JAVA_SHORT, resolveElementOffset(f, elementIndex), value);
+    }
+    @Override
     public void setInt(int fieldIndex, int value) {
-        ensureBound(); ensureIndexInRange(fieldIndex);
-        var f = descriptor.getField(fieldIndex);
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.INT);
+        ensureScalarField(f);
         segment.set(ValueLayout.JAVA_INT, f.offset(), value);
     }
     @Override
+    public void setInt(int fieldIndex, int elementIndex, int value) {
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.INT);
+        segment.set(ValueLayout.JAVA_INT, resolveElementOffset(f, elementIndex), value);
+    }
+    @Override
     public void setLong(int fieldIndex, long value) {
-        ensureBound(); ensureIndexInRange(fieldIndex);
-        var f = descriptor.getField(fieldIndex);
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.LONG);
+        ensureScalarField(f);
         segment.set(ValueLayout.JAVA_LONG, f.offset(), value);
     }
     @Override
+    public void setLong(int fieldIndex, int elementIndex, long value) {
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.LONG);
+        segment.set(ValueLayout.JAVA_LONG, resolveElementOffset(f, elementIndex), value);
+    }
+    @Override
     public void setFloat(int fieldIndex, float value) {
-        ensureBound(); ensureIndexInRange(fieldIndex);
-        var f = descriptor.getField(fieldIndex);
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.FLOAT);
+        ensureScalarField(f);
         segment.set(ValueLayout.JAVA_FLOAT, f.offset(), value);
     }
     @Override
+    public void setFloat(int fieldIndex, int elementIndex, float value) {
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.FLOAT);
+        segment.set(ValueLayout.JAVA_FLOAT, resolveElementOffset(f, elementIndex), value);
+    }
+    @Override
     public void setDouble(int fieldIndex, double value) {
-        ensureBound(); ensureIndexInRange(fieldIndex);
-        var f = descriptor.getField(fieldIndex);
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.DOUBLE);
+        ensureScalarField(f);
         segment.set(ValueLayout.JAVA_DOUBLE, f.offset(), value);
     }
     @Override
+    public void setDouble(int fieldIndex, int elementIndex, double value) {
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.DOUBLE);
+        segment.set(ValueLayout.JAVA_DOUBLE, resolveElementOffset(f, elementIndex), value);
+    }
+    @Override
     public void setBoolean(int fieldIndex, boolean value) {
-        ensureBound(); ensureIndexInRange(fieldIndex);
-        var f = descriptor.getField(fieldIndex);
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.BOOLEAN);
+        ensureScalarField(f);
         segment.set(ValueLayout.JAVA_BOOLEAN, f.offset(), value);
     }
     @Override
+    public void setBoolean(int fieldIndex, int elementIndex, boolean value) {
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.BOOLEAN);
+        segment.set(ValueLayout.JAVA_BOOLEAN, resolveElementOffset(f, elementIndex), value);
+    }
+    @Override
     public void setChar(int fieldIndex, char value) {
-        ensureBound(); ensureIndexInRange(fieldIndex);
-        var f = descriptor.getField(fieldIndex);
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.CHAR);
+        ensureScalarField(f);
         segment.set(ValueLayout.JAVA_CHAR, f.offset(), value);
+    }
+    @Override
+    public void setChar(int fieldIndex, int elementIndex, char value) {
+        var f = resolveField(fieldIndex);
+        ensureFieldType(f, ComponentDescriptor.FieldType.CHAR);
+        segment.set(ValueLayout.JAVA_CHAR, resolveElementOffset(f, elementIndex), value);
     }
 
     // ------------- Legacy name-based API (routes through index resolution) -------------
@@ -187,6 +330,10 @@ public class ComponentHandle implements IReadWriteComponentHandle {
     @Override
     public Object getByIndex(int idx) {
         var field = descriptor.getField(idx);
+        if (field.isArray()) {
+            throw new IllegalArgumentException(
+                "Field '" + field.name() + "' is a fixed array; use indexed access instead");
+        }
         return switch (field.type()) {
             case BYTE -> segment.get(ValueLayout.JAVA_BYTE, field.offset());
             case SHORT -> segment.get(ValueLayout.JAVA_SHORT, field.offset());
@@ -215,6 +362,10 @@ public class ComponentHandle implements IReadWriteComponentHandle {
     @Override
     public void setByIndex(int idx, Object value) {
         var field = descriptor.getField(idx);
+        if (field.isArray()) {
+            throw new IllegalArgumentException(
+                "Field '" + field.name() + "' is a fixed array; use indexed access instead");
+        }
         switch (field.type()) {
             case BYTE -> segment.set(ValueLayout.JAVA_BYTE, field.offset(), (byte) value);
             case SHORT -> segment.set(ValueLayout.JAVA_SHORT, field.offset(), (short) value);

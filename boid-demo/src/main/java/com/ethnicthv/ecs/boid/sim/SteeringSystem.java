@@ -65,25 +65,27 @@ public final class SteeringSystem extends BaseSystem {
     @Query(
         fieldInject = "sequentialSteeringQuery",
         mode = ExecutionMode.SEQUENTIAL,
-        with = {Acceleration3.class}
+        with = {Acceleration3.class, NeighborBuffer.class}
     )
     private void querySequential(
         @Id int entityId,
-        @Component(type = Acceleration3.class) Acceleration3Handle acceleration
+        @Component(type = Acceleration3.class) Acceleration3Handle acceleration,
+        @Component(type = NeighborBuffer.class) NeighborBufferHandle neighborBuffer
     ) {
-        computeSteering(entityId, acceleration);
+        computeSteering(entityId, acceleration, neighborBuffer);
     }
 
     @Query(
         fieldInject = "parallelSteeringQuery",
         mode = ExecutionMode.PARALLEL,
-        with = {Acceleration3.class}
+        with = {Acceleration3.class, NeighborBuffer.class}
     )
     private void queryParallel(
         @Id int entityId,
-        @Component(type = Acceleration3.class) Acceleration3Handle acceleration
+        @Component(type = Acceleration3.class) Acceleration3Handle acceleration,
+        @Component(type = NeighborBuffer.class) NeighborBufferHandle neighborBuffer
     ) {
-        computeSteering(entityId, acceleration);
+        computeSteering(entityId, acceleration, neighborBuffer);
     }
 
     public SteeringExecutionMode executionMode() {
@@ -150,7 +152,7 @@ public final class SteeringSystem extends BaseSystem {
         this.cohesionWeight = cohesionWeight;
     }
 
-    private void computeSteering(int entityId, Acceleration3Handle acceleration) {
+    private void computeSteering(int entityId, Acceleration3Handle acceleration, NeighborBufferHandle neighborBuffer) {
         int boidIndex = spatialHash.boidIndexOf(entityId);
         if (boidIndex < 0) {
             throw new IllegalStateException("Unknown boid entity during steering: " + entityId);
@@ -173,12 +175,12 @@ public final class SteeringSystem extends BaseSystem {
         float cohesionY = 0.0f;
         float cohesionZ = 0.0f;
         int separationCount = 0;
-        int neighborCount = spatialHash.fixedNeighborCount(boidIndex);
+        int neighborCount = neighborBuffer.getCount();
         float maxForce = this.maxForce;
         float maxForceSq = this.maxForceSq;
         for (int neighborSlot = 0; neighborSlot < neighborCount; neighborSlot++) {
-            int neighborIndex = spatialHash.fixedNeighborAt(boidIndex, neighborSlot);
-            byte offsetPack = spatialHash.fixedNeighborOffsetPackAt(boidIndex, neighborSlot);
+            int neighborIndex = neighborBuffer.getNeighbors(neighborSlot);
+            byte offsetPack = neighborBuffer.getOffsetPacks(neighborSlot);
             float deltaX = spatialHash.positionX(neighborIndex) + spatialHash.offsetXFromPack(offsetPack) - px;
             float deltaY = spatialHash.positionY(neighborIndex) + spatialHash.offsetYFromPack(offsetPack) - py;
             float deltaZ = spatialHash.positionZ(neighborIndex) + spatialHash.offsetZFromPack(offsetPack) - pz;

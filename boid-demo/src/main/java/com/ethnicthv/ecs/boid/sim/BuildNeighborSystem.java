@@ -29,12 +29,12 @@ public final class BuildNeighborSystem extends BaseSystem {
     @Query(
         fieldInject = "neighborBuildQuery",
         mode = ExecutionMode.PARALLEL,
-        with = {CellKey.class}
+        with = {NeighborBuffer.class}
     )
     private void query(
         @Id int entityId,
-        @Component(type = CellKey.class) CellKeyHandle cell
+        @Component(type = NeighborBuffer.class) NeighborBufferHandle neighborBuffer
     ) {
-        spatialHash.buildNeighborsForEntity(entityId);
+        spatialHash.buildNeighborsForEntity(entityId, neighborBuffer);
     }
 }

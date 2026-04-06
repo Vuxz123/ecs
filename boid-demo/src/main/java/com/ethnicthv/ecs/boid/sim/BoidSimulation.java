@@ -3,10 +3,12 @@ package com.ethnicthv.ecs.boid.sim;
 import com.ethnicthv.ecs.ECS;
 import com.ethnicthv.ecs.boid.debug.WorldStatsCollector;
 import com.ethnicthv.ecs.core.archetype.ArchetypeWorld;
+import com.ethnicthv.ecs.core.archetype.EntityCommandBuffer;
 import com.ethnicthv.ecs.core.components.ComponentHandle;
 import com.ethnicthv.ecs.core.components.ComponentManager;
 import com.ethnicthv.ecs.core.system.SystemGroup;
 
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.util.SplittableRandom;
 
@@ -30,6 +32,7 @@ public final class BoidSimulation implements AutoCloseable {
     private final int accelerationYIndex;
     private final int accelerationZIndex;
     private final int cellValueIndex;
+    private final int neighborCountIndex;
 
     private int[] boidEntityIds = new int[0];
     private long fixedTickCount;
@@ -67,6 +70,7 @@ public final class BoidSimulation implements AutoCloseable {
         accelerationYIndex = componentManager.getDescriptor(Acceleration3.class).getFieldIndex("y");
         accelerationZIndex = componentManager.getDescriptor(Acceleration3.class).getFieldIndex("z");
         cellValueIndex = componentManager.getDescriptor(CellKey.class).getFieldIndex("cellId");
+        neighborCountIndex = componentManager.getDescriptor(NeighborBuffer.class).getFieldIndex("count");
     }
 
     public void bootstrap() {
@@ -81,9 +85,7 @@ public final class BoidSimulation implements AutoCloseable {
     public void resetBoids(int boidCount, long randomSeed) {
         ensureAlive();
 
-        for (int entityId : boidEntityIds) {
-            world.destroyEntity(entityId);
-        }
+        destroyExistingBoids();
 
         fixedTickCount = 0L;
         lastFixedStepNanos = 0L;
@@ -98,7 +100,7 @@ public final class BoidSimulation implements AutoCloseable {
 
         SplittableRandom random = new SplittableRandom(randomSeed);
         for (int i = 0; i < boidCount; i++) {
-            int entityId = ecs.createEntity(Position3.class, Velocity3.class, Acceleration3.class, CellKey.class);
+            int entityId = ecs.createEntity(Position3.class, Velocity3.class, Acceleration3.class, CellKey.class, NeighborBuffer.class);
             boidEntityIds[i] = entityId;
 
             float px = randomRange(random, -config.spawnExtent(), config.spawnExtent());
@@ -336,6 +338,23 @@ public final class BoidSimulation implements AutoCloseable {
         spatialHash.publishRenderPositionByIndex(boidIndex, positionX, positionY, positionZ);
     }
 
+    int readNeighborCount(int boidIndex) {
+        ensureBootstrapped();
+        if (boidIndex < 0 || boidIndex >= boidEntityIds.length) {
+            throw new IndexOutOfBoundsException("boidIndex=" + boidIndex + ", size=" + boidEntityIds.length);
+        }
+
+        int entityId = boidEntityIds[boidIndex];
+        MemorySegment neighborSegment = world.getComponent(entityId, NeighborBuffer.class);
+        if (neighborSegment == null) {
+            throw new IllegalStateException("Boid entity " + entityId + " is missing NeighborBuffer");
+        }
+
+        try (ComponentManager.BoundHandle neighbor = componentManager.acquireBoundHandle(NeighborBuffer.class, neighborSegment)) {
+            return neighbor.handle().getInt(neighborCountIndex);
+        }
+    }
+
     public void shutdown() {
         close();
     }
@@ -374,6 +393,21 @@ public final class BoidSimulation implements AutoCloseable {
 
     private static float randomRange(SplittableRandom random, float min, float max) {
         return min + (float) random.nextDouble() * (max - min);
+    }
+
+    private void destroyExistingBoids() {
+        if (boidEntityIds.length == 0) {
+            return;
+        }
+
+        try (Arena commandArena = Arena.ofConfined();
+             EntityCommandBuffer commandBuffer = new EntityCommandBuffer(commandArena)) {
+            EntityCommandBuffer.ParallelWriter writer = commandBuffer.asParallelWriter(world);
+            for (int entityId : boidEntityIds) {
+                writer.destroyEntity(entityId);
+            }
+            commandBuffer.playback(world);
+        }
     }
 
     private void updateTicksPerSecond(long completedAt) {

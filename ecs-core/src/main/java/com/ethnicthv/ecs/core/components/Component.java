@@ -19,6 +19,12 @@ public interface Component {
         int size() default 0;
 
         /**
+         * Number of inline primitive elements stored for this field.
+         * A value of 1 means scalar storage.
+         */
+        int length() default 1;
+
+        /**
          * Explicit offset position in bytes (-1 means auto-layout)
          */
         int offset() default -1;

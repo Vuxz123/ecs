@@ -100,8 +100,31 @@ public class ComponentDescriptor {
         FieldType type,
         long offset,
         long size,
-        int alignment
-    ) {}
+        int alignment,
+        int elementCount
+    ) {
+        public FieldDescriptor(String name, FieldType type, long offset, long size, int alignment) {
+            this(name, type, offset, size, alignment, 1);
+        }
+
+        public FieldDescriptor {
+            if (elementCount < 1) {
+                throw new IllegalArgumentException("elementCount must be >= 1 for field '" + name + "'");
+            }
+        }
+
+        public boolean isArray() {
+            return elementCount > 1;
+        }
+
+        public long elementSize() {
+            if (size % elementCount != 0) {
+                throw new IllegalStateException("Field '" + name + "' size=" + size
+                    + " is not divisible by elementCount=" + elementCount);
+            }
+            return size / elementCount;
+        }
+    }
 
     /**
      * Supported field types
@@ -161,6 +184,7 @@ public class ComponentDescriptor {
               .append(" @").append(field.offset())
               .append(" (size=").append(field.size())
               .append(", align=").append(field.alignment())
+              .append(", elements=").append(field.elementCount())
               .append(")\n");
         }
         sb.append("]] ");

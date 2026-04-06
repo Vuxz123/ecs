@@ -16,6 +16,9 @@ repositories {
 }
 
 dependencies {
+    testImplementation(platform("org.junit:junit-bom:5.10.0"))
+    testImplementation("org.junit.jupiter:junit-jupiter")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     // Hiện tại Core chỉ dùng JDK chuẩn (Panama), chưa cần thư viện ngoài.
     // Nếu sau này cần logging (vd: slf4j), hãy thêm bằng 'api' hoặc 'implementation'
 }

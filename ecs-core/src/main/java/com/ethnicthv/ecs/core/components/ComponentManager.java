@@ -49,6 +49,7 @@ public class ComponentManager {
         descriptors.computeIfAbsent(componentClass, cls -> {
             ComponentDescriptor gen = tryLoadGeneratedDescriptor(cls);
             ComponentDescriptor desc = gen != null ? gen : buildDescriptor(cls);
+            validateDescriptor(cls, desc);
             // Cập nhật map ID -> Descriptor cho lookup O(1)
             idToDescriptorMap.put(typeId, desc);
             return desc;
@@ -72,6 +73,7 @@ public class ComponentManager {
         if (descriptor == null) {
             throw new IllegalArgumentException("descriptor must not be null for " + componentClass.getName());
         }
+        validateDescriptor(componentClass, descriptor);
         descriptors.putIfAbsent(componentClass, descriptor);
         // Cập nhật cả map ID -> Descriptor (không ghi đè nếu đã có)
         idToDescriptorMap.putIfAbsent(typeId, descriptor);
@@ -331,8 +333,10 @@ public class ComponentManager {
             ComponentDescriptor.FieldType fieldType =
                 ComponentDescriptor.FieldType.fromJavaType(fieldInfo.field.getType());
 
-            long fieldSize = fieldInfo.annotation.size() > 0 ?
+            int elementCount = validateFieldLength(fieldInfo.field, fieldInfo.annotation.length());
+            long elementSize = fieldInfo.annotation.size() > 0 ?
                 fieldInfo.annotation.size() : fieldType.getSize();
+            long fieldSize = elementSize * elementCount;
 
             int alignment = fieldInfo.annotation.alignment() > 0 ?
                 fieldInfo.annotation.alignment() : fieldType.getNaturalAlignment();
@@ -354,7 +358,8 @@ public class ComponentManager {
                 fieldType,
                 offset,
                 fieldSize,
-                alignment
+                alignment,
+                elementCount
             ));
 
             currentOffset = offset + fieldSize;
@@ -388,6 +393,33 @@ public class ComponentManager {
             kind = isManaged ? ComponentDescriptor.ComponentKind.INSTANCE_MANAGED : ComponentDescriptor.ComponentKind.INSTANCE_UNMANAGED;
         }
         return kind;
+    }
+
+    private static int validateFieldLength(Field field, int length) {
+        if (length < 1) {
+            throw new IllegalArgumentException("Field " + field.getDeclaringClass().getName() + "." + field.getName()
+                + " has invalid @Component.Field length=" + length + "; length must be >= 1");
+        }
+        return length;
+    }
+
+    private static void validateDescriptor(Class<?> componentClass, ComponentDescriptor descriptor) {
+        for (ComponentDescriptor.FieldDescriptor field : descriptor.getFields()) {
+            if (field.elementCount() < 1) {
+                throw new IllegalArgumentException("Descriptor for " + componentClass.getName() + " field '"
+                    + field.name() + "' has invalid elementCount=" + field.elementCount());
+            }
+            if (field.size() < field.elementCount()) {
+                throw new IllegalArgumentException("Descriptor for " + componentClass.getName() + " field '"
+                    + field.name() + "' has size=" + field.size() + " smaller than elementCount="
+                    + field.elementCount());
+            }
+            if (field.size() % field.elementCount() != 0) {
+                throw new IllegalArgumentException("Descriptor for " + componentClass.getName() + " field '"
+                    + field.name() + "' has size=" + field.size() + " not divisible by elementCount="
+                    + field.elementCount());
+            }
+        }
     }
 
     /**

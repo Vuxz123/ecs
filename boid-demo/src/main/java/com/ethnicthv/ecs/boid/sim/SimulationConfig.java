@@ -69,6 +69,11 @@ public record SimulationConfig(
         if (maxNeighbors <= 0) {
             throw new IllegalArgumentException("maxNeighbors must be > 0");
         }
+        if (maxNeighbors > NeighborBuffer.CAPACITY) {
+            throw new IllegalArgumentException(
+                "maxNeighbors must be <= NeighborBuffer.CAPACITY (" + NeighborBuffer.CAPACITY + ")"
+            );
+        }
         if (targetSamplesPerCell <= 0) {
             throw new IllegalArgumentException("targetSamplesPerCell must be > 0");
         }

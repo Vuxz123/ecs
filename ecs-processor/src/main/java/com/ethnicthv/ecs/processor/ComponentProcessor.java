@@ -79,6 +79,8 @@ public class ComponentProcessor extends BaseProcessor {
                     } else {
                         note("Deferring generation for %s due to unresolved composite dependencies", compType.getQualifiedName());
                     }
+                } catch (IllegalArgumentException ex) {
+                    error("%s", ex.getMessage());
                 } catch (IOException ex) {
                     error("Failed to generate meta/handle for %s: %s", compType.getQualifiedName(), ex.getMessage());
                 }
@@ -255,8 +257,12 @@ public class ComponentProcessor extends BaseProcessor {
             String typeFqn = ve.asType().toString();
             FieldType primitive = tryMapPrimitive(typeFqn);
             if (primitive != null) {
+                if (attrs.length < 1) {
+                    throw new IllegalArgumentException("Invalid @Component.Field length=" + attrs.length + " for " + ownerType.getQualifiedName() + "." + name);
+                }
                 int alignment = attrs.alignment > 0 ? attrs.alignment : primitive.naturalAlignment;
-                long size = attrs.size > 0 ? attrs.size : primitive.size;
+                long elementSize = attrs.size > 0 ? attrs.size : primitive.size;
+                long size = elementSize * attrs.length;
                 long offset;
                 if (layout.type == LayoutType.EXPLICIT && attrs.offset >= 0) {
                     offset = attrs.offset;
@@ -265,10 +271,14 @@ public class ComponentProcessor extends BaseProcessor {
                 } else {
                     offset = currentOffset;
                 }
-                out.add(new GeneratedField(name, primitive, offset, size, alignment));
+                out.add(new GeneratedField(name, primitive, offset, size, alignment, attrs.length));
                 currentOffset = offset + size;
                 maxAlignment = Math.max(maxAlignment, alignment);
                 continue;
+            }
+            if (attrs.length > 1) {
+                throw new IllegalArgumentException("Fixed array fields currently support only primitive element types: "
+                    + ownerType.getQualifiedName() + "." + name + " -> " + typeFqn);
             }
             LocalDescriptor sub = generatedDescriptors.get(typeFqn);
             if (sub == null) {
@@ -288,7 +298,7 @@ public class ComponentProcessor extends BaseProcessor {
             for (GeneratedField sf : sub.fields()) {
                 String flatName = name + "_" + sf.name;
                 long flatOffset = baseOffset + sf.offset;
-                out.add(new GeneratedField(flatName, sf.ft, flatOffset, sf.size, sf.alignment));
+                out.add(new GeneratedField(flatName, sf.ft, flatOffset, sf.size, sf.alignment, sf.elementCount));
             }
             currentOffset = baseOffset + compositeSize;
             maxAlignment = Math.max(maxAlignment, compositeAlign);
@@ -352,7 +362,7 @@ public class ComponentProcessor extends BaseProcessor {
                 GeneratedField f = genFields.get(i);
                 w.write("                new com.ethnicthv.ecs.core.components.ComponentDescriptor.FieldDescriptor(\"" + f.name + "\", ");
                 w.write("com.ethnicthv.ecs.core.components.ComponentDescriptor.FieldType." + f.ft.enumName + ", ");
-                w.write(f.offset + "L, " + f.size + "L, " + f.alignment + ")");
+                w.write(f.offset + "L, " + f.size + "L, " + f.alignment + ", " + f.elementCount + ")");
                 if (i < genFields.size() - 1) w.write(",");
                 w.write("\n");
             }
@@ -400,6 +410,20 @@ public class ComponentProcessor extends BaseProcessor {
                     case SHORT -> valueLayout = "JAVA_SHORT";
                     case CHAR -> valueLayout = "JAVA_CHAR";
                     default -> valueLayout = "JAVA_INT";
+                }
+                if (f.elementCount > 1) {
+                    w.write("  public " + javaTypeFor(f.ft) + " get" + prop + "(int index) { ");
+                    w.write("var __field = " + meta + ".DESCRIPTOR.getField(" + idxConst + "); ");
+                    w.write("if (index < 0 || index >= __field.elementCount()) throw new IndexOutOfBoundsException(\"Index out of range for field '" + f.name + "': \" + index + \" (count=\" + __field.elementCount() + \")\"); ");
+                    w.write("var __seg = __internalHandle.getSegment(); long __off = this.__baseOffset + __field.offset() + (__field.elementSize() * index); ");
+                    w.write("return __seg.get(java.lang.foreign.ValueLayout." + valueLayout + ", __off); }\n");
+                    w.write("  public void set" + prop + "(int index, " + javaTypeFor(f.ft) + " v) { ");
+                    w.write("var __field = " + meta + ".DESCRIPTOR.getField(" + idxConst + "); ");
+                    w.write("if (index < 0 || index >= __field.elementCount()) throw new IndexOutOfBoundsException(\"Index out of range for field '" + f.name + "': \" + index + \" (count=\" + __field.elementCount() + \")\"); ");
+                    w.write("var __seg = __internalHandle.getSegment(); long __off = this.__baseOffset + __field.offset() + (__field.elementSize() * index); ");
+                    w.write("__seg.set(java.lang.foreign.ValueLayout." + valueLayout + ", __off, v); }\n");
+                    w.write("  public int lengthOf" + prop + "() { return " + f.elementCount + "; }\n");
+                    continue;
                 }
                 // absolute offset based on meta field offset
                 w.write("  public " + javaTypeFor(f.ft) + " get" + prop + "() { ");
@@ -475,6 +499,7 @@ public class ComponentProcessor extends BaseProcessor {
             if (!(el instanceof TypeElement te)) continue;
             if (!te.getQualifiedName().contentEquals(ANNO_FIELD)) continue;
             int size = 0;
+            int length = 1;
             int offset = -1;
             int alignment = 0;
             for (Map.Entry<? extends ExecutableElement, ? extends AnnotationValue> e : am.getElementValues().entrySet()) {
@@ -483,14 +508,15 @@ public class ComponentProcessor extends BaseProcessor {
                 if (av instanceof Number n) {
                     switch (name) {
                         case "size" -> size = n.intValue();
+                        case "length" -> length = n.intValue();
                         case "offset" -> offset = n.intValue();
                         case "alignment" -> alignment = n.intValue();
                     }
                 }
             }
-            return new FieldAttrs(size, offset, alignment);
+            return new FieldAttrs(size, length, offset, alignment);
         }
-        return new FieldAttrs(0, -1, 0);
+        return new FieldAttrs(0, 1, -1, 0);
     }
 
     private FieldType tryMapPrimitive(String typeName) {
@@ -550,10 +576,17 @@ public class ComponentProcessor extends BaseProcessor {
     // ---------------------------------------------------------------------
     private record ComponentLayout(LayoutType type, long sizeOverride) {}
     private enum LayoutType { SEQUENTIAL, PADDING, EXPLICIT }
-    private record FieldAttrs(int size, int offset, int alignment) {}
+    private record FieldAttrs(int size, int length, int offset, int alignment) {}
     private static final class GeneratedField {
-        final String name; final FieldType ft; final long offset; final long size; final int alignment;
-        GeneratedField(String n, FieldType ft, long off, long sz, int a) { this.name = n; this.ft = ft; this.offset = off; this.size = sz; this.alignment = a; }
+        final String name; final FieldType ft; final long offset; final long size; final int alignment; final int elementCount;
+        GeneratedField(String n, FieldType ft, long off, long sz, int a, int elementCount) {
+            this.name = n;
+            this.ft = ft;
+            this.offset = off;
+            this.size = sz;
+            this.alignment = a;
+            this.elementCount = elementCount;
+        }
     }
     // New structure to remember composite fields for slice handle generation
     private static final class CompositeFieldInfo {

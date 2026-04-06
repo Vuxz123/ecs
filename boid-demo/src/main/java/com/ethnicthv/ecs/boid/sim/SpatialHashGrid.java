@@ -37,9 +37,6 @@ final class SpatialHashGrid {
     private float[] orderedVelocityX = new float[0];
     private float[] orderedVelocityY = new float[0];
     private float[] orderedVelocityZ = new float[0];
-    private int[] fixedNeighborCounts = new int[0];
-    private int[] fixedNeighbors = new int[0];
-    private byte[] fixedNeighborOffsetPacks = new byte[0];
     private int framesSinceNeighborRefresh;
     private boolean neighborBufferInitialized;
     private final int[] cellCounts;
@@ -218,17 +215,15 @@ final class SpatialHashGrid {
             framesSinceNeighborRefresh++;
             return false;
         }
-
-        Arrays.fill(fixedNeighborCounts, 0, boundEntityIds.length, 0);
         return true;
     }
 
-    void buildNeighborsForEntity(int entityId) {
+    void buildNeighborsForEntity(int entityId, NeighborBufferHandle neighborBuffer) {
         int boidIndex = boidIndexOf(entityId);
         if (boidIndex < 0) {
             throw new IllegalStateException("Unknown boid entity during neighbor build: " + entityId);
         }
-        buildFixedNeighborsForBoid(boidIndex);
+        buildFixedNeighborsForBoid(boidIndex, neighborBuffer);
     }
 
     void endNeighborBuild() {
@@ -347,18 +342,6 @@ final class SpatialHashGrid {
         return orderedVelocityZ[orderedIndex];
     }
 
-    int fixedNeighborCount(int boidIndex) {
-        return fixedNeighborCounts[boidIndex];
-    }
-
-    int fixedNeighborAt(int boidIndex, int neighborSlot) {
-        return fixedNeighbors[boidIndex * maxNeighbors + neighborSlot];
-    }
-
-    byte fixedNeighborOffsetPackAt(int boidIndex, int neighborSlot) {
-        return fixedNeighborOffsetPacks[boidIndex * maxNeighbors + neighborSlot];
-    }
-
     float offsetXFromPack(byte packedOffset) {
         int packed = packedOffset & 0xFF;
         return decodeAxisShift(packed & 0b11) * worldSize;
@@ -453,9 +436,6 @@ final class SpatialHashGrid {
         orderedVelocityX = Arrays.copyOf(orderedVelocityX, capacity);
         orderedVelocityY = Arrays.copyOf(orderedVelocityY, capacity);
         orderedVelocityZ = Arrays.copyOf(orderedVelocityZ, capacity);
-        fixedNeighborCounts = Arrays.copyOf(fixedNeighborCounts, capacity);
-        fixedNeighbors = Arrays.copyOf(fixedNeighbors, capacity * maxNeighbors);
-        fixedNeighborOffsetPacks = Arrays.copyOf(fixedNeighborOffsetPacks, capacity * maxNeighbors);
     }
 
     private void ensureEntityMappingCapacity(int capacity) {
@@ -550,12 +530,11 @@ final class SpatialHashGrid {
         return !neighborBufferInitialized || framesSinceNeighborRefresh + 1 >= neighborRefreshIntervalTicks;
     }
 
-    private void buildFixedNeighborsForBoid(int boidIndex) {
+    private void buildFixedNeighborsForBoid(int boidIndex, NeighborBufferHandle neighborBuffer) {
         float px = positionX[boidIndex];
         float py = positionY[boidIndex];
         float pz = positionZ[boidIndex];
         int cellKey = cellKeys[boidIndex];
-        int fixedNeighborBase = boidIndex * maxNeighbors;
         int count = 0;
         int neighborBase = neighborBase(cellKey);
         int neighborSlotStart = Math.floorMod(mix32(boidIndex * 31 + cellKey * 17), NEIGHBOR_CELL_COUNT);
@@ -601,9 +580,8 @@ final class SpatialHashGrid {
                     continue;
                 }
 
-                int targetIndex = fixedNeighborBase + count;
-                fixedNeighbors[targetIndex] = neighborIndex;
-                fixedNeighborOffsetPacks[targetIndex] = offsetPack;
+                neighborBuffer.setNeighbors(count, neighborIndex);
+                neighborBuffer.setOffsetPacks(count, offsetPack);
                 count++;
                 if (count >= maxNeighbors) {
                     break outer;
@@ -611,7 +589,7 @@ final class SpatialHashGrid {
             }
         }
 
-        fixedNeighborCounts[boidIndex] = count;
+        neighborBuffer.setCount(count);
     }
 
     private int sampleStep(int cellPopulation) {

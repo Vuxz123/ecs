@@ -71,6 +71,8 @@ class BoidSimulationTest {
             );
             assertTrue(positiveEdgeBoid.cellKey() >= 0);
             assertTrue(negativeEdgeBoid.cellKey() >= 0);
+            assertEquals(1, simulation.readNeighborCount(0));
+            assertEquals(1, simulation.readNeighborCount(1));
         }
     }
 
@@ -156,6 +158,24 @@ class BoidSimulationTest {
                 assertEquals(boid.positionY(), sampled[baseIndex + 1], POSITION_TOLERANCE);
                 assertEquals(boid.positionZ(), sampled[baseIndex + 2], POSITION_TOLERANCE);
             }
+        }
+    }
+
+    @Test
+    void resetBoidsRebuildsWorldWithoutLeavingOldEntitiesBehind() {
+        SimulationConfig config = SimulationConfig.defaultConfig()
+            .withInitialBoidCount(16)
+            .withRandomSeed(909L);
+
+        try (BoidSimulation simulation = new BoidSimulation(config)) {
+            simulation.bootstrap();
+            assertEquals(16, simulation.getStats().entityCount());
+
+            simulation.resetBoids(32, 1234L);
+
+            BoidSimulation.SimulationStats stats = simulation.getStats();
+            assertEquals(32, stats.boidCount());
+            assertEquals(32, stats.entityCount());
         }
     }
 
