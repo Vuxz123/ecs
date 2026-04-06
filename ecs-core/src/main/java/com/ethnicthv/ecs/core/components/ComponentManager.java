@@ -5,9 +5,9 @@ import java.lang.foreign.MemorySegment;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.ArrayDeque;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -22,8 +22,9 @@ public class ComponentManager {
     private final ConcurrentHashMap<Integer, ComponentDescriptor> idToDescriptorMap = new ConcurrentHashMap<>();
     private final AtomicInteger nextTypeId = new AtomicInteger(0);
 
-    // Pool of reusable ComponentHandle instances to avoid allocations when mapping into archetype arrays
-    private final ConcurrentLinkedDeque<ComponentHandle> handlePool = new ConcurrentLinkedDeque<>();
+    // Pool of reusable ComponentHandle instances to avoid allocations when mapping into archetype arrays.
+    // Handles are thread-confined in all hot paths, so keep the pool local to avoid contention.
+    private final ThreadLocal<Deque<ComponentHandle>> handlePool = ThreadLocal.withInitial(ArrayDeque::new);
 
     // Typed handle pools keyed by component class, used by AP-generated code for PositionHandle, etc.
     private final ConcurrentHashMap<Class<?>, HandlePool<? extends IBindableHandle>> typedHandlePools = new ConcurrentHashMap<>();
@@ -113,7 +114,8 @@ public class ComponentManager {
      * Acquire a reusable ComponentHandle from the pool (or create a new one).
      */
     public ComponentHandle acquireHandle() {
-        ComponentHandle h = handlePool.pollFirst();
+        Deque<ComponentHandle> localPool = handlePool.get();
+        ComponentHandle h = localPool.pollFirst();
         if (h == null) {
             h = new ComponentHandle();
         }
@@ -126,7 +128,7 @@ public class ComponentManager {
     public void releaseHandle(ComponentHandle handle) {
         if (handle == null) return;
         handle.clear();
-        handlePool.offerFirst(handle);
+        handlePool.get().offerFirst(handle);
     }
 
     /**

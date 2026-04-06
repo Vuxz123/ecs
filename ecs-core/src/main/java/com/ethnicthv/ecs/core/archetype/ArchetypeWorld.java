@@ -2,6 +2,7 @@ package com.ethnicthv.ecs.core.archetype;
 
 import com.ethnicthv.ecs.core.api.archetype.IQueryBuilder;
 import com.ethnicthv.ecs.core.components.*;
+import com.ethnicthv.ecs.core.execution.EcsWorkerPool;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -25,11 +26,13 @@ public final class ArchetypeWorld implements AutoCloseable {
     private final ManagedComponentStore managedStore = new ManagedComponentStore();
     // New: store for managed shared components (de-duplicated)
     final SharedComponentStore sharedStore = new SharedComponentStore();
+    private final EcsWorkerPool workerPool;
 
     public ArchetypeWorld(ComponentManager componentManager) {
         this.arena = Arena.ofShared();
         this.componentManager = componentManager;
         this.entityRecords = new ConcurrentHashMap<>();
+        this.workerPool = new EcsWorkerPool();
         // Initialize ArchetypeManager after metadata map is ready
         this.archetypeManager = new ArchetypeManager(arena, componentManager, this::getComponentMetadata);
     }
@@ -368,11 +371,32 @@ public final class ArchetypeWorld implements AutoCloseable {
      * Close the world and release resources
      */
     public void close() {
-        arena.close();
+        RuntimeException failure = null;
+        try {
+            workerPool.close();
+        } catch (RuntimeException ex) {
+            failure = ex;
+        }
+        try {
+            arena.close();
+        } catch (RuntimeException ex) {
+            if (failure != null) {
+                failure.addSuppressed(ex);
+            } else {
+                failure = ex;
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
     }
 
     public ComponentManager getComponentManager() {
         return componentManager;
+    }
+
+    public EcsWorkerPool getWorkerPool() {
+        return workerPool;
     }
 
     /**

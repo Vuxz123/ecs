@@ -3,10 +3,14 @@ package com.ethnicthv.ecs;
 import com.ethnicthv.ecs.core.archetype.ArchetypeWorld;
 import com.ethnicthv.ecs.core.components.ComponentManager;
 import com.ethnicthv.ecs.core.components.IBindableHandle;
+import com.ethnicthv.ecs.core.execution.EcsRuntimeController;
+import com.ethnicthv.ecs.core.execution.EcsRuntimeState;
+import com.ethnicthv.ecs.core.execution.SystemThreadMode;
 import com.ethnicthv.ecs.core.system.*;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
@@ -20,12 +24,23 @@ public final class ECS implements AutoCloseable {
     private final ArchetypeWorld world;
     private final SystemManager systemManager;
     private final GameLoop gameLoop;
+    private final EcsRuntimeController runtimeController;
 
     // Private constructor, use ECS.builder() instead.
-    private ECS(ArchetypeWorld world, SystemManager systemManager) {
+    private ECS(
+        ArchetypeWorld world,
+        SystemManager systemManager,
+        SystemThreadMode systemThreadMode,
+        String simulationThreadName,
+        float fixedTickRate
+    ) {
         this.world = world;
         this.systemManager = systemManager;
-        this.gameLoop = new GameLoop(systemManager);
+        this.gameLoop = new GameLoop(systemManager, fixedTickRate);
+        this.runtimeController = new EcsRuntimeController(systemManager, systemThreadMode, simulationThreadName, fixedTickRate);
+        if (systemThreadMode == SystemThreadMode.DEDICATED_THREAD) {
+            systemManager.setUpdateAccessGuard(runtimeController::assertUpdateThread);
+        }
     }
 
     /**
@@ -102,7 +117,12 @@ public final class ECS implements AutoCloseable {
      * Start the main game loop (blocking).
      */
     public void run() {
-        gameLoop.run();
+        if (runtimeController.threadMode() == SystemThreadMode.MAIN_THREAD) {
+            gameLoop.run();
+            return;
+        }
+        startRuntime();
+        awaitRuntimeStop();
     }
 
     /**
@@ -110,6 +130,27 @@ public final class ECS implements AutoCloseable {
      */
     public void stop() {
         gameLoop.stop();
+        runtimeController.stop();
+    }
+
+    public void startRuntime() {
+        runtimeController.start();
+    }
+
+    public void stopRuntime() {
+        runtimeController.stop();
+    }
+
+    public void awaitRuntimeStop() {
+        runtimeController.awaitStop();
+    }
+
+    public SystemThreadMode systemThreadMode() {
+        return runtimeController.threadMode();
+    }
+
+    public EcsRuntimeState runtimeState() {
+        return runtimeController.state();
     }
 
     /**
@@ -117,8 +158,26 @@ public final class ECS implements AutoCloseable {
      */
     @Override
     public void close() {
+        RuntimeException failure = null;
         gameLoop.stop();
-        world.close();
+        runtimeController.stop();
+        try {
+            runtimeController.awaitStop();
+        } catch (RuntimeException ex) {
+            failure = ex;
+        }
+        try {
+            world.close();
+        } catch (RuntimeException ex) {
+            if (failure != null) {
+                failure.addSuppressed(ex);
+            } else {
+                failure = ex;
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
     }
 
     /**
@@ -127,6 +186,7 @@ public final class ECS implements AutoCloseable {
      * without creating a full {@link GameLoop}.
      */
     public void updateGroup(SystemGroup group, float deltaTime) {
+        ensureManualUpdateAllowed("ECS.updateGroup");
         systemManager.updateGroup(group, deltaTime);
     }
 
@@ -135,7 +195,17 @@ public final class ECS implements AutoCloseable {
      * Caller is responsible for running and stopping the loop.
      */
     public GameLoop createGameLoop(float targetTickRate) {
+        ensureManualUpdateAllowed("ECS.createGameLoop");
         return new GameLoop(systemManager, targetTickRate);
+    }
+
+    private void ensureManualUpdateAllowed(String operation) {
+        if (runtimeController.threadMode() == SystemThreadMode.DEDICATED_THREAD) {
+            throw new IllegalStateException(
+                operation + " is not available when systemThreadMode=DEDICATED_THREAD. " +
+                    "Use startRuntime()/stopRuntime() or build ECS with MAIN_THREAD."
+            );
+        }
     }
 
     // =================================================================
@@ -146,6 +216,9 @@ public final class ECS implements AutoCloseable {
         private final ComponentManager componentManager = new ComponentManager();
         private final List<SystemRegistration> systems = new ArrayList<>();
         private boolean autoRegisterComponents = true;
+        private SystemThreadMode systemThreadMode = SystemThreadMode.MAIN_THREAD;
+        private String simulationThreadName = EcsRuntimeController.defaultThreadName();
+        private float fixedTickRate = EcsRuntimeController.defaultFixedTickRate();
 
         record SystemRegistration(ISystem system, SystemGroup group) {}
 
@@ -184,6 +257,27 @@ public final class ECS implements AutoCloseable {
             return this;
         }
 
+        public Builder withSystemThreadMode(SystemThreadMode systemThreadMode) {
+            this.systemThreadMode = Objects.requireNonNull(systemThreadMode, "systemThreadMode");
+            return this;
+        }
+
+        public Builder withSimulationThreadName(String simulationThreadName) {
+            if (simulationThreadName == null || simulationThreadName.isBlank()) {
+                throw new IllegalArgumentException("simulationThreadName must not be blank");
+            }
+            this.simulationThreadName = simulationThreadName;
+            return this;
+        }
+
+        public Builder withFixedTickRate(float fixedTickRate) {
+            if (fixedTickRate <= 0f) {
+                throw new IllegalArgumentException("fixedTickRate must be > 0");
+            }
+            this.fixedTickRate = fixedTickRate;
+            return this;
+        }
+
         /**
          * Build and initialize the ECS world.
          * This will:
@@ -217,7 +311,7 @@ public final class ECS implements AutoCloseable {
                 sysMgr.registerPipelineSystem(reg.system(), reg.group());
             }
 
-            return new ECS(world, sysMgr);
+            return new ECS(world, sysMgr, systemThreadMode, simulationThreadName, fixedTickRate);
         }
     }
 }

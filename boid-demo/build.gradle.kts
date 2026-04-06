@@ -37,6 +37,10 @@ dependencies {
     runtimeOnly("io.github.spair:imgui-java-natives-windows:$imguiVersion")
 
     implementation("javax.annotation:javax.annotation-api:1.3.2")
+
+    testImplementation(platform("org.junit:junit-bom:5.10.0"))
+    testImplementation("org.junit.jupiter:junit-jupiter")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
 application {

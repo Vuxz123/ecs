@@ -18,12 +18,20 @@ import java.util.*;
  * the AP-generated injectors (see {@code QueryProcessor}).
  */
 public class SystemManager {
+    @FunctionalInterface
+    public interface UpdateAccessGuard {
+        void beforeUpdate(String operation);
+    }
+
+    private static final UpdateAccessGuard NO_OP_GUARD = operation -> {};
+
     private final ArchetypeWorld world;
     // Systems organized by group instance for the new pipeline API
     private final Map<SystemGroup, List<ISystem>> systemsByGroup = new HashMap<>();
     // Sorted views of groups by update mode
     private final List<SystemGroup> fixedGroups = new ArrayList<>();
     private final List<SystemGroup> variableGroups = new ArrayList<>();
+    private volatile UpdateAccessGuard updateAccessGuard = NO_OP_GUARD;
 
     public SystemManager(ArchetypeWorld world) {
         this.world = world;
@@ -124,11 +132,16 @@ public class SystemManager {
         return list == null ? List.of() : new ArrayList<>(list);
     }
 
+    public void setUpdateAccessGuard(UpdateAccessGuard updateAccessGuard) {
+        this.updateAccessGuard = updateAccessGuard == null ? NO_OP_GUARD : updateAccessGuard;
+    }
+
     /**
      * Execute all enabled systems in a single group.
      * This is useful for game loops that want fine-grained control, e.g. fixed-step PHYSICS.
      */
     public void updateGroup(SystemGroup group, float deltaTime) {
+        updateAccessGuard.beforeUpdate("SystemManager.updateGroup");
         List<ISystem> list = systemsByGroup.get(group);
         if (list == null) return;
         for (ISystem sys : list) {
@@ -143,6 +156,7 @@ public class SystemManager {
      * primarily useful for simple demos.
      */
     public void update(float deltaTime) {
+        updateAccessGuard.beforeUpdate("SystemManager.update");
         // First fixed groups in priority order
         for (SystemGroup group : fixedGroups) {
             updateGroup(group, deltaTime);

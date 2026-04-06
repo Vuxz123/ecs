@@ -306,6 +306,16 @@ Acceptance:
 - Can run large-count presets reliably.
 - Benchmark numbers are labeled clearly as hardware-dependent.
 
+Current benchmark packaging direction:
+- Interactive stress preset: `1M RR` with reduced render stride.
+- Quick benchmark: short warm-up and sample window from the overlay.
+- Headless benchmark CLI:
+  `./gradlew :boid-demo:run --args="--headless-benchmark --boids 100000 --warmup 240 --samples 600 --mode parallel"`
+- CSV export location:
+  `benchmark-results/`
+- CSV format:
+  one summary row plus per-sample timing rows for frame, simulation, steering, and render cost.
+
 ## 12. Recommended Build Order
 
 Implement in this order:

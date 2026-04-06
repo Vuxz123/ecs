@@ -74,6 +74,9 @@ These numbers are measured from the real `ecs-benchmark` module against the same
 - [`docs/ADVANCED_GUIDE.md`](docs/ADVANCED_GUIDE.md): Deep dives on parallel queries, memory layout, QA/QC, and tuning (appendices reference legacy design docs)
 - [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md): Snapshot of real benchmark numbers (scaling, parallel queries, batched structural changes, `EntityCommandBuffer`) using the `ecs-benchmark` module
 - [`docs/BOID_DEMO_PLAN.md`](docs/BOID_DEMO_PLAN.md): Proposed 3D boid flocking demo architecture, performance story, and phased implementation plan
+- [`docs/SPATIAL_PARTITIONING_DECISION.md`](docs/SPATIAL_PARTITIONING_DECISION.md): Design note for why boid spatial cells use a frame-local spatial hash instead of per-frame shared-component reassignment
+- [`docs/QUERY_SCHEDULER_OPT_PLAN.md`](docs/QUERY_SCHEDULER_OPT_PLAN.md): Profiler-driven plan for dedicated ECS workers, generated query scheduling, render snapshot publication, and optional thread affinity
+- [`docs/SYSTEM_THREAD_MODE_PLAN.md`](docs/SYSTEM_THREAD_MODE_PLAN.md): Plan for choosing between main-thread system execution and a dedicated simulation thread with command/snapshot handoff
 - [`docs/ROADMAP.md`](docs/ROADMAP.md): Completed milestones, current goals, and rolling backlog updated at the end of every milestone
 
 Need more? Browse `ecs-test` for runnable demos or open an issue if you want walkthroughs on additional topics.
