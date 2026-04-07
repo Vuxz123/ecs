@@ -1,5 +1,7 @@
 package com.ethnicthv.ecs.boid.sim;
 
+import com.ethnicthv.ecs.core.components.ComponentHandle;
+
 import java.util.Arrays;
 
 final class SpatialHashGrid {
@@ -14,6 +16,7 @@ final class SpatialHashGrid {
     private final float worldSize;
     private final float cellExtent;
     private final int cellsPerAxis;
+    private final float neighborRadius;
     private final float neighborRadiusSq;
     private final int maxNeighbors;
     private final int targetSamplesPerCell;
@@ -66,6 +69,7 @@ final class SpatialHashGrid {
         this.worldSize = worldHalfExtent * 2.0f;
         this.cellsPerAxis = resolveCellsPerAxis(worldSize, config.neighborRadius());
         this.cellExtent = worldSize / cellsPerAxis;
+        this.neighborRadius = config.neighborRadius();
         this.neighborRadiusSq = config.neighborRadius() * config.neighborRadius();
         this.maxNeighbors = config.maxNeighbors();
         this.targetSamplesPerCell = config.targetSamplesPerCell();
@@ -218,12 +222,18 @@ final class SpatialHashGrid {
         return true;
     }
 
-    void buildNeighborsForEntity(int entityId, NeighborBufferHandle neighborBuffer) {
+    void buildNeighborsForEntity(
+        int entityId,
+        ComponentHandle neighborBuffer,
+        int neighborCountIndex,
+        int neighborEntriesIndex,
+        int neighborOffsetPacksIndex
+    ) {
         int boidIndex = boidIndexOf(entityId);
         if (boidIndex < 0) {
             throw new IllegalStateException("Unknown boid entity during neighbor build: " + entityId);
         }
-        buildFixedNeighborsForBoid(boidIndex, neighborBuffer);
+        buildFixedNeighborsForBoid(boidIndex, neighborBuffer, neighborCountIndex, neighborEntriesIndex, neighborOffsetPacksIndex);
     }
 
     void endNeighborBuild() {
@@ -530,7 +540,13 @@ final class SpatialHashGrid {
         return !neighborBufferInitialized || framesSinceNeighborRefresh + 1 >= neighborRefreshIntervalTicks;
     }
 
-    private void buildFixedNeighborsForBoid(int boidIndex, NeighborBufferHandle neighborBuffer) {
+    private void buildFixedNeighborsForBoid(
+        int boidIndex,
+        ComponentHandle neighborBuffer,
+        int neighborCountIndex,
+        int neighborEntriesIndex,
+        int neighborOffsetPacksIndex
+    ) {
         float px = positionX[boidIndex];
         float py = positionY[boidIndex];
         float pz = positionZ[boidIndex];
@@ -575,13 +591,22 @@ final class SpatialHashGrid {
                 float deltaX = orderedPositionX[orderedIndex] + offsetX - px;
                 float deltaY = orderedPositionY[orderedIndex] + offsetY - py;
                 float deltaZ = orderedPositionZ[orderedIndex] + offsetZ - pz;
+                if (deltaX < -neighborRadius || deltaX > neighborRadius) {
+                    continue;
+                }
+                if (deltaY < -neighborRadius || deltaY > neighborRadius) {
+                    continue;
+                }
+                if (deltaZ < -neighborRadius || deltaZ > neighborRadius) {
+                    continue;
+                }
                 float distanceSq = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ;
                 if (distanceSq <= EPSILON || distanceSq > neighborRadiusSq) {
                     continue;
                 }
 
-                neighborBuffer.setNeighbors(count, neighborIndex);
-                neighborBuffer.setOffsetPacks(count, offsetPack);
+                neighborBuffer.setInt(neighborEntriesIndex, count, neighborIndex);
+                neighborBuffer.setByte(neighborOffsetPacksIndex, count, offsetPack);
                 count++;
                 if (count >= maxNeighbors) {
                     break outer;
@@ -589,7 +614,7 @@ final class SpatialHashGrid {
             }
         }
 
-        neighborBuffer.setCount(count);
+        neighborBuffer.setInt(neighborCountIndex, count);
     }
 
     private int sampleStep(int cellPopulation) {

@@ -1,6 +1,8 @@
 package com.ethnicthv.ecs.boid.sim;
 
 import com.ethnicthv.ecs.core.api.archetype.IGeneratedQuery;
+import com.ethnicthv.ecs.core.archetype.ArchetypeWorld;
+import com.ethnicthv.ecs.core.components.ComponentHandle;
 import com.ethnicthv.ecs.core.system.BaseSystem;
 import com.ethnicthv.ecs.core.system.ExecutionMode;
 import com.ethnicthv.ecs.core.system.annotation.Component;
@@ -12,6 +14,7 @@ public final class SteeringSystem extends BaseSystem {
 
     private final SpatialHashGrid spatialHash;
     private final float maxSpeed;
+    private final float neighborRadius;
     private final float separationRadius;
     private final float inverseSeparationRadius;
     private final float neighborRadiusSq;
@@ -22,6 +25,12 @@ public final class SteeringSystem extends BaseSystem {
     private float separationWeight;
     private float alignmentWeight;
     private float cohesionWeight;
+    private int accelerationXIndex = -1;
+    private int accelerationYIndex = -1;
+    private int accelerationZIndex = -1;
+    private int neighborCountIndex = -1;
+    private int neighborEntriesIndex = -1;
+    private int neighborOffsetPacksIndex = -1;
 
     private IGeneratedQuery sequentialSteeringQuery;
     private IGeneratedQuery parallelSteeringQuery;
@@ -35,6 +44,7 @@ public final class SteeringSystem extends BaseSystem {
         this.maxSpeed = config.maxSpeed();
         this.maxForce = config.maxForce();
         this.maxForceSq = maxForce * maxForce;
+        this.neighborRadius = config.neighborRadius();
         this.separationRadius = config.separationRadius();
         this.inverseSeparationRadius = 1.0f / config.separationRadius();
         this.neighborRadiusSq = config.neighborRadius() * config.neighborRadius();
@@ -44,6 +54,17 @@ public final class SteeringSystem extends BaseSystem {
         this.alignmentWeight = config.alignmentWeight();
         this.cohesionWeight = config.cohesionWeight();
         this.executionMode = config.steeringExecutionMode();
+    }
+
+    @Override
+    public void onAwake(ArchetypeWorld world) {
+        super.onAwake(world);
+        accelerationXIndex = world.getComponentManager().getDescriptor(Acceleration3.class).getFieldIndex("x");
+        accelerationYIndex = world.getComponentManager().getDescriptor(Acceleration3.class).getFieldIndex("y");
+        accelerationZIndex = world.getComponentManager().getDescriptor(Acceleration3.class).getFieldIndex("z");
+        neighborCountIndex = world.getComponentManager().getDescriptor(NeighborBuffer.class).getFieldIndex("count");
+        neighborEntriesIndex = world.getComponentManager().getDescriptor(NeighborBuffer.class).getFieldIndex("neighbors");
+        neighborOffsetPacksIndex = world.getComponentManager().getDescriptor(NeighborBuffer.class).getFieldIndex("offsetPacks");
     }
 
     @Override
@@ -69,8 +90,8 @@ public final class SteeringSystem extends BaseSystem {
     )
     private void querySequential(
         @Id int entityId,
-        @Component(type = Acceleration3.class) Acceleration3Handle acceleration,
-        @Component(type = NeighborBuffer.class) NeighborBufferHandle neighborBuffer
+        @Component(type = Acceleration3.class) ComponentHandle acceleration,
+        @Component(type = NeighborBuffer.class) ComponentHandle neighborBuffer
     ) {
         computeSteering(entityId, acceleration, neighborBuffer);
     }
@@ -81,9 +102,9 @@ public final class SteeringSystem extends BaseSystem {
         with = {Acceleration3.class, NeighborBuffer.class}
     )
     private void queryParallel(
-        @Id int entityId,
-        @Component(type = Acceleration3.class) Acceleration3Handle acceleration,
-        @Component(type = NeighborBuffer.class) NeighborBufferHandle neighborBuffer
+            @Id int entityId,
+            @Component(type = Acceleration3.class) ComponentHandle acceleration,
+            @Component(type = NeighborBuffer.class) ComponentHandle neighborBuffer
     ) {
         computeSteering(entityId, acceleration, neighborBuffer);
     }
@@ -152,7 +173,7 @@ public final class SteeringSystem extends BaseSystem {
         this.cohesionWeight = cohesionWeight;
     }
 
-    private void computeSteering(int entityId, Acceleration3Handle acceleration, NeighborBufferHandle neighborBuffer) {
+    private void computeSteering(int entityId, ComponentHandle acceleration, ComponentHandle neighborBuffer) {
         int boidIndex = spatialHash.boidIndexOf(entityId);
         if (boidIndex < 0) {
             throw new IllegalStateException("Unknown boid entity during steering: " + entityId);
@@ -175,15 +196,24 @@ public final class SteeringSystem extends BaseSystem {
         float cohesionY = 0.0f;
         float cohesionZ = 0.0f;
         int separationCount = 0;
-        int neighborCount = neighborBuffer.getCount();
+        int neighborCount = neighborBuffer.getInt(neighborCountIndex);
         float maxForce = this.maxForce;
         float maxForceSq = this.maxForceSq;
         for (int neighborSlot = 0; neighborSlot < neighborCount; neighborSlot++) {
-            int neighborIndex = neighborBuffer.getNeighbors(neighborSlot);
-            byte offsetPack = neighborBuffer.getOffsetPacks(neighborSlot);
+            int neighborIndex = neighborBuffer.getInt(neighborEntriesIndex, neighborSlot);
+            byte offsetPack = neighborBuffer.getByte(neighborOffsetPacksIndex, neighborSlot);
             float deltaX = spatialHash.positionX(neighborIndex) + spatialHash.offsetXFromPack(offsetPack) - px;
             float deltaY = spatialHash.positionY(neighborIndex) + spatialHash.offsetYFromPack(offsetPack) - py;
             float deltaZ = spatialHash.positionZ(neighborIndex) + spatialHash.offsetZFromPack(offsetPack) - pz;
+            if (deltaX < -neighborRadius || deltaX > neighborRadius) {
+                continue;
+            }
+            if (deltaY < -neighborRadius || deltaY > neighborRadius) {
+                continue;
+            }
+            if (deltaZ < -neighborRadius || deltaZ > neighborRadius) {
+                continue;
+            }
             float distanceSq = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ;
             if (distanceSq <= EPSILON || distanceSq > neighborRadiusSq) {
                 continue;
@@ -267,9 +297,9 @@ public final class SteeringSystem extends BaseSystem {
         }
 
         float steeringScale = clampScale(steeringX, steeringY, steeringZ, maxForce, maxForceSq, fastMathEnabled);
-        acceleration.setX(steeringX * steeringScale);
-        acceleration.setY(steeringY * steeringScale);
-        acceleration.setZ(steeringZ * steeringScale);
+        acceleration.setFloat(accelerationXIndex, steeringX * steeringScale);
+        acceleration.setFloat(accelerationYIndex, steeringY * steeringScale);
+        acceleration.setFloat(accelerationZIndex, steeringZ * steeringScale);
     }
 
     private static float clampScale(float x, float y, float z, float maxMagnitude, float maxMagnitudeSq, boolean fastMathEnabled) {

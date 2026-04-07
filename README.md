@@ -78,6 +78,7 @@ These numbers are measured from the real `ecs-benchmark` module against the same
 - [`docs/QUERY_SCHEDULER_OPT_PLAN.md`](docs/QUERY_SCHEDULER_OPT_PLAN.md): Profiler-driven plan for dedicated ECS workers, generated query scheduling, render snapshot publication, and optional thread affinity
 - [`docs/SYSTEM_THREAD_MODE_PLAN.md`](docs/SYSTEM_THREAD_MODE_PLAN.md): Plan for choosing between main-thread system execution and a dedicated simulation thread with command/snapshot handoff
 - [`docs/FIXED_ARRAY_COMPONENT_PLAN.md`](docs/FIXED_ARRAY_COMPONENT_PLAN.md): Design and phased implementation plan for inline fixed-size primitive arrays in unmanaged ECS components
+- [`docs/BOID_OPTIMIZATION_STATUS_AND_PLAN.md`](docs/BOID_OPTIMIZATION_STATUS_AND_PLAN.md): Status review of the boid optimization work already implemented, plus the remaining production-focused optimization plan
 - [`docs/ROADMAP.md`](docs/ROADMAP.md): Completed milestones, current goals, and rolling backlog updated at the end of every milestone
 
 Need more? Browse `ecs-test` for runnable demos or open an issue if you want walkthroughs on additional topics.
